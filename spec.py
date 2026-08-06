@@ -1,12 +1,23 @@
 from astropy.io import fits
-from astropy.table import Table
-from astropy.modeling import functional_models
-from astropy.convolution import convolve
-from astroquery.mast import Observations
-from scipy.interpolate import interp1d
+from consts import *
 import matplotlib.pyplot as plt
 import numpy as np
-import urllib.request
+import os,subprocess
+
+
+# Given a scenario whose abundances you wish to fit, and a spectrum to which the scenario is fitted
+#   to, find best-fit abundances for a list of metal species.
+
+# For testing, I'm using a scenario, '944', with T = 17,000K, log(g) = 8, and a chondritic [Si/H]
+#   of -5.5. Values are approximately those derived by Rogers+24a.
+specf   = 'fits files/gd56fuv.fits'
+scen    = 'gd56'
+
+dat     = np.genfromtxt(SCEN+f"/{scen}/synspec/fort.7")
+wvln    = dat[:,0]
+flux    = dat[:,1]
+
+################################################################################################
 
 def chi2(y,ymodel,yerr):
     """
@@ -16,7 +27,111 @@ def chi2(y,ymodel,yerr):
     res = np.sum(np.nan_to_num((y-ymodel)**2/yerr**2,nan=0))
     return res/(len(y)-2)
 
+################################################################################################
+
+# Function that reruns SYNSPEC with an altered abundance of a specific abundance
+def alter_synspec_abn(scen:str,anum:int,minabn,maxabn,ddex):
+    """
+    Using a provided scenario's base spectrum, produce a range of spectra with the abundance of
+    a specified element 'species' ranging from 'minabn' to 'maxabn' in steps of 'ddex'.
+
+    Inputs:
+    - scen (string):    the scenario whose new spectra are being calculated
+    - anum (int):       The atomic number of the species whose abundance is changed
+    - minabn (int):     the minimum value of log(Sp/H)
+    - maxabn (int):     the maximum value of log(Sp/H)
+    - ddex (float):     the step in values of log(Sp/H)               
+    """
+
+    # Save base spectrum, if not already done
+    scendir = SCEN+f"/{scen}/synspec/"
+    
+    if not 'base.7' in os.listdir(scendir):
+        subprocess.run(['cp',f"{scendir}fort.7",f"{scendir}base.7"])
+
+    # Update fort.55 to reflect a change in abundances
+    file    = open(f"{scendir}fort.55",'r')
+    lines   = file.readlines()
+    file.close()
+
+    l = lines[1]
+    l = l.split()
+    l[-1] = '1\n'
+    lines[1] = '\t'.join(l)
+
+    file    = open(f"{scendir}fort.55",'w')
+    file.write('\t' + ''.join(lines))
+    file.close()
+
+    ### Iteratively run SYNSPEC with new abundances
+
+    abn     = minabn
+    while abn <= maxabn:
+        
+        val     = 10**abn
+        valstr  = np.format_float_scientific(val,precision=3)
+        if f"{anum}_{str(round(abn,1))}.7" in os.listdir(scendir):
+            abn += ddex
+            continue
+
+        # Write file
+        file = open(f"{scendir}fort.56",'w+')
+        file.write('1\n')
+        file.write(str(anum)+'\t'+valstr)
+        file.close()
+
+        # Run SYNSPEC
+        os.chdir(scendir)
+        print(f"{anum}:  {valstr}")
+        print("Running SYNSPEC...")
+        os.system(f"{SYNEXE} < fort.5 > fort.6")
+        subprocess.run(['cp','fort.7',f"{anum}_{str(round(abn,1))}.7"])
+        os.chdir(HOME)
+
+        # Modify abundance
+        abn += ddex
+
 ##########################################################################################
+
+### Functions to open observed and model spectra
+
+def openModel(fnamem:str):
+    """
+    Read model spectrum
+    """
+    dat = np.loadtxt(fnamem)
+    return dat[:,0],dat[:,1]
+
+def openFile(fname:str):
+    """
+    Extract the spectrum from a single .fits file.
+
+    I'm not sure that all files I'll be working with share the same format, so
+    this function may be edited on the fly.
+    """
+    with fits.open(fname) as hdu:
+        data_fuva   = hdu[1].data[1]
+        data_fuvb   = hdu[1].data[0]
+        wvln0       = np.hstack((data_fuva[3],data_fuvb[3]))    # Angstroms
+        flux0       = np.hstack((data_fuva[4],data_fuvb[4]))    # erg/cm^2/s/A
+        sigma0      = np.hstack((data_fuva[5],data_fuvb[5]))    # ^^^^^^^^^^^^
+
+        # Remove zeros in spectrum
+        wvln,flux,sigma = [],[],[]
+        for i in range(len(wvln0)):
+            if flux0[i] != 0:
+                wvln.append(wvln0[i])
+                flux.append(flux0[i])
+                sigma.append(sigma0[i])
+        wvln = np.array(wvln)
+        flux = np.array(flux)
+        sigma= np.array(sigma)
+        hdu.close()
+    return wvln,flux,sigma
+
+##########################################################################################
+
+### Functions to convolve model spectra with the proper LSF
 
 def lsfParams(fname:str):
     """
@@ -407,71 +522,8 @@ def convolveModel(fnamem,fname):
 
 ##########################################################################################
 
-def openModel(fnamem:str):
-    """
-    Read model spectrum
-    """
-    dat = np.loadtxt(fnamem)
-    return dat[:,0],dat[:,1]
-
-def openFile(fname:str):
-    """
-    Extract the spectrum from a single .fits file.
-
-    I'm not sure that all files I'll be working with share the same format, so
-    this function may be edited on the fly.
-    """
-    with fits.open(fname) as hdu:
-        data_fuva   = hdu[1].data[1]
-        data_fuvb   = hdu[1].data[0]
-        wvln0       = np.hstack((data_fuva[3],data_fuvb[3]))    # Angstroms
-        flux0       = np.hstack((data_fuva[4],data_fuvb[4]))    # erg/cm^2/s/A
-        sigma0      = np.hstack((data_fuva[5],data_fuvb[5]))    # ^^^^^^^^^^^^
-
-        # Remove zeros in spectrum
-        wvln,flux,sigma = [],[],[]
-        for i in range(len(wvln0)):
-            if flux0[i] != 0:
-                wvln.append(wvln0[i])
-                flux.append(flux0[i])
-                sigma.append(sigma0[i])
-        wvln = np.array(wvln)
-        flux = np.array(flux)
-        sigma= np.array(sigma)
-        hdu.close()
-    return wvln,flux,sigma
-
-def stackFiles(fnames:list[str]):
-    """
-    Get the stacked spectrum from a list of files.
-
-    Need to know how to propogate standard deviations. Something aint adding up
-    """
-    # fig,ax = plt.subplots()
-    flux_base   = None
-    wvln_base   = None
-    sigma_base  = None
-    count = 0
-    for fname in fnames:
-        wvln,flux,sigma = openFile(fname)
-        # ax.plot(wvln,flux,label=fname)
-        if flux_base is None:
-            flux_base   = flux
-            wvln_base   = wvln
-            sigma_base  = sigma
-        else:
-            flux    = np.interp(wvln_base,wvln,flux)
-            sigma   = np.interp(wvln_base,wvln,sigma)
-            flux_base   += flux
-            sigma_base  += sigma
-        count += 1
-
-    # ax.plot(wvln_base,flux_base/count)
-    # plt.legend()
-    # plt.show()
-
-    return wvln_base,flux_base/count,sigma_base/np.sqrt(count)
-
+### Function to scale a modeled spectrum up to an observed spectrum, fitting for scale factor
+###     and radial velocity
 def scaleModel(wvln,flux,sigma,wvln_m,flux_m):
     """
     Fit an observed spectrum (or stacked spectrum) with a modeled one, 
@@ -489,7 +541,6 @@ def scaleModel(wvln,flux,sigma,wvln_m,flux_m):
         scaled_model_flux   = model_flux*s
         # score = np.sum(np.abs(flux-scaled_model_flux))
         score   = chi2(flux,scaled_model_flux,sigma)
-        print(s,score)
         if score<min_score:
             min_s=s
             min_score=score
@@ -516,9 +567,10 @@ def scaleModel(wvln,flux,sigma,wvln_m,flux_m):
     
     # Fetch chi2 minimum
     ind_v,ind_s = np.unravel_index(np.argmin(chi2_grid),shape=(n,n))
+    min_chi2    = chi2_grid[ind_v][ind_s]
     min_v       = v_grid[ind_v]
     min_s       = s_grid[ind_s]
-    print(f"Chi-2 minimum:              {chi2_grid[ind_v][ind_s]}")
+    print(f"Chi-2 minimum:              {min_chi2}")
     print(f"Best-fit flux scale factor: {min_s}")
     print(f"Best-fit Doppler shift:     {min_v}km/s")
 
@@ -529,60 +581,63 @@ def scaleModel(wvln,flux,sigma,wvln_m,flux_m):
     # Re-interpolate to observed spectrum points (not strictly necessary)
     # scaled_model_flux   = np.interp(wvln,scaled_model_wvln,scaled_model_flux)
 
-    # Plot that shit
+    # # Plot that shit
+    # fig,ax = plt.subplots()
+    # ax.plot(wvln,flux)
+    # ax.plot(scaled_model_wvln,scaled_model_flux)
+    # plt.show()
+
+    return min_chi2,min_v,min_s
+  
+# Function that finds best fit to a line using chi2 minimization, by varying abundance of a species
+def fit_line(spec:str,scen:str,anum:int,minabn,maxabn,ddex,linecen,width):
+
+    # Open and trim observed flux
+    wvln_all,flux_all,sigma_all = openFile(spec)
+    # wvln    = wvln_all[(wvln_all > linecen-width) and (wvln_all < linecen+width)]
+    wvln    = wvln_all[np.abs(wvln_all-linecen)<=width]
+    flux    = flux_all[np.abs(wvln_all-linecen)<=width]
+    sigma   = sigma_all[np.abs(wvln_all-linecen)<=width]
+
+    abns,probs = [],[]
+
+    abn     = minabn
+    while abn <= maxabn:
+        abnstr  = round(abn,1)
+
+        # Open and trim model spectrum
+        fnamem  = SCEN+f"/{scen}/synspec/{str(anum)}_{abnstr}.7"
+        wvln_m_all,flux_m_all   = openModel(fnamem)
+        wvln_m  = wvln_m_all[np.abs(wvln_m_all-linecen)<=width]
+        flux_m  = flux_m_all[np.abs(wvln_m_all-linecen)<=width]
+
+        # Fit spectra segments
+        min_chi2,min_v,min_s = scaleModel(wvln,flux,sigma,wvln_m,flux_m)
+        prob    = np.exp(-0.5*min_chi2)
+        abns.append(abn)
+        probs.append(prob)
+
+        abn += ddex
+
+    ### Derive best-fit value and errorbars
+    bestfit = abns[np.argmax(probs)]
+    print(bestfit)
+    
+    pdf     = probs/np.sum(probs)
+    cdf     = np.zeros_like(probs)
+    for i in range(len(probs)):
+        cdf[i] = np.sum(pdf[:i+1])
+
+    fit = np.polyfit(abns,cdf,deg=5)
+    fit = np.poly1d(fit)
+
     fig,ax = plt.subplots()
-    ax.plot(wvln,flux)
-    ax.plot(scaled_model_wvln,scaled_model_flux)
+    ax.plot(abns,cdf)
+    ax.plot(abns,fit(abns))
     plt.show()
 
-# fname   = 'fits files/WD1943+0163.fits'
-# fnamem  = 'tlusty/scenarios/wd1943+163/synspec/fort.7'
-# # fnamem  = 'tlusty/scenarios/t20000g800/synspec/fort.7'
-# # fnamem  = 'tlusty/scenarios/test/lte/fort.14'
 
-# wvln,flux,sigma = openFile(fname)
-# wvln_m,flux_m   = convolveModel(fnamem,fname)
+    
+alter_synspec_abn(scen=scen,anum=16,minabn=-7,maxabn=-5,ddex=0.2)
 
-# scaleModel(wvln,flux,sigma,wvln_m,flux_m)
-
-# input()
-# input()
-
-fname   = 'fits files/gd56fuv.fits'
-fname_m = 'tlusty/scenarios/gd56/synspec/fort.7'
- 
-wvln_m,flux_m   = convolveModel(fname_m,fname)
-wvln,flux,sigma = openFile(fname)
-
-
-# file    = fits.open(fname)
-# data    = file[1].data[0]
-# wvln    = data[0]*10
-# flux    = data[1]
-# sigma   = data[2]
-
-# wvln_m,flux_m   = openModel(fname_m)
-
-scaleModel(wvln,flux,sigma,wvln_m,flux_m)
-
-input()
-input()
-
-# fig,ax = plt.subplots()
-
-# ax.plot(wvln,flux)
-# ax.plot(wvln_m,flux_m*1e-22)
-# plt.show()
-
-
-wvln,flux,sigma = openFile(fname)
-
-wvln_m,flux_m   = convolveModel(fname_m,fname)
-scaleModel(wvln,flux,sigma,wvln_m,flux_m)
-
-fig,ax = plt.subplots()
-ax.plot(wvln,flux)
-ax.plot(wvln_m,flux_m*4e-5)
-plt.show()
-
-
+fit_line(specf,scen,anum=14,minabn=-6.5,maxabn=-4.5,ddex=0.1,linecen=1265,width=1)

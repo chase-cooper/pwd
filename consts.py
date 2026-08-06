@@ -1,4 +1,5 @@
-PATH    = "/Users/cooper/Documents/Research/polluted_white_dwarfs/tlusty/"
+HOME    = "/Users/cooper/Documents/Research/pwd"
+PATH    = "/Users/cooper/Documents/Research/pwd/tlusty/"
 TLUSTY  = PATH+'tlusty'
 SYNSPEC = PATH+'synspec'
 SCEN    = PATH+'scenarios'

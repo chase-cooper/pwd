@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 from scipy.interpolate import LinearNDInterpolator
+from consts import *
 
 
 def doubleModelComp():
@@ -146,37 +147,20 @@ def model_flux_to_phot_fname(fname):
 
     return np.concat([sdss_model_flux,pans_model_flux,skym_model_flux])
 
+fig,ax = plt.subplots()
 
-sdss_eff_wvlns  = np.array([360.8,467.18,614.11,745.79,892.28]) * 1e-9
-pans_eff_wvlns  = np.array([481.02,615.55,750.3,866.84,961.36]) * 1e-9
-skym_eff_wvlns  = np.array([350.02,501.6,607.69,773.28,912.03]) * 1e-9
-wvlns           = np.concat([sdss_eff_wvlns,pans_eff_wvlns,skym_eff_wvlns]) * 1e10
+dat = np.genfromtxt(SCEN+'/944/synspec/fort.7')
+ax.plot(dat[:,0],dat[:,1])
 
-fig,ax = plt.subplots(ncols=2)
+for val in np.arange(-6.5,-4.5,0.2):
+    valstr = np.format_float_positional(val,precision=1)
 
-dat_h   = np.genfromtxt('tlusty/scenarios/test_h/synspec/fort.7')
-wvln_h  = dat_h[:,0]
-flux_h  = dat_h[:,1]
+    dat = np.genfromtxt(SCEN+f'/944/synspec/14_{valstr}.7')
+    ax.plot(dat[:,0],dat[:,1],label=valstr)
 
-dat_m   = np.genfromtxt('tlusty/scenarios/test_m/synspec/fort.7')
-wvln_m  = dat_m[:,0]
-flux_m  = dat_m[:,1]
-
-ax[0].plot(wvln_h,flux_h,label='Pure H')
-ax[0].plot(wvln_m,flux_m,label="Metals")
-
-phot_h  = model_flux_to_phot_fname('tlusty/scenarios/test_h/synspec/fort.7')
-phot_m  = model_flux_to_phot_fname('tlusty/scenarios/test_m/synspec/fort.7')
-
-ax[1].scatter(wvlns,phot_h,label='Pure H')
-ax[1].scatter(wvlns,phot_m,label="Metals")
-
-ax[0].set_xlim(2000,10000)
-ax[0].set_yscale('log')
-
-for a in ax:
-    a.legend()
-
+ax.set_yscale('log')
+ax.legend()
 plt.show()
+
 
 

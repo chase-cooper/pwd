@@ -141,7 +141,7 @@ def metals(scen:str,teff:float,log_g:float,spdict:dict,is_lte:bool=True):
         print("\n Model run has encountered an error. Exiting...")
         sys.exit(0)
     print("LTE metals model completed!")
-    os.chdir(PATH+'/..')
+    os.chdir(HOME)
 
 ###################################################################################################
 
@@ -156,7 +156,7 @@ def synspec(scen:str,species_dict,imode:int=0,lammin:int=900,lammax:int=10000):
        0       1       1       1       0
        1       1       0       0       0
        2       0       0
-    {2}    -{3}      10       0  0.001     0.1
+    {2}    -{3}      10       0  0.001     0.01
        0       0"""
     unit5 = unit5.replace('{1}',str(imode))
     unit5 = unit5.replace('{2}',str(lammin))
