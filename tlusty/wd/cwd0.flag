@@ -1,0 +1,9 @@
+IFRYB=1,iFMOL=1,IHYDPR=2,IFENTR=1                                                     
+IPRINT=1,IPRING=0,CHMAX=1.e-4                                                   
+HMIX0=0.6,MLTYPE=2,ITEK=150,IACC=150                                            
+OPRMIN=1.e-3,ABROS0=1.                                                          
+TAUDIV=1.e-2,IDLST=0                                                            
+NDCGAP=5,ICONRE=0,IDEEPC=3                                                      
+ILGDER=1,CRFLIM=-10.,IMUCON=40,ICONRS=5                                         
+DIFT=0.01,DIFP=0.01    
+IHYDDK=1

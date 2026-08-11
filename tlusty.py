@@ -37,19 +37,31 @@ def pureHmodel(scen:str,teff:float,log_g:float):
 
     writeUnit5(path=PATH+'scenarios/'+scen+'/lte',teff=teff,log_g=log_g)
 
-
+    model_broke = False
     for i in range(ntries):
         try:
             os.system(f"{TLEXE} < fort.5 > lte.6")
             out7    = open(PATH+f'scenarios/{scen}/lte/lte.6','r').read()
-            if 'NaN' in out7:
+            if ('FINAL MODEL ATMOSPHERE' not in out7) or ('NaN' in out7):
                 print(f"Attempt {i+1}:  NaN's in output.")
+                model_broke = True
             else:
+                model_broke = False
                 break
         except:
             print(f"Attempt {i+1}:   Model run has encountered an error.")
-    print("LTE model completed!")
-    os.chdir(PATH+'/..')
+            model_broke = True
+
+    os.chdir(HOME)
+    if model_broke:
+        log = open('log.dat','a')
+        log.write(scen+'\tLTE'+'\n')
+        log.close()
+        return False
+    else:
+        print("LTE model completed!")
+        return True
+    
 
 def pureHemodel(scen:str,teff:float,log_g:float):
     """
@@ -132,16 +144,31 @@ def metals(scen:str,teff:float,log_g:float,spdict:dict,is_lte:bool=True):
 
     # Copy output from pure-H model
     subprocess.run(['cp','../lte/fort.7','fort.8'])
-    
-    # Run TLUSTY
-    try:
-        # subprocess.run([tlexe,'<','fort.5','>','metals.6'])
-        os.system(f"{tlexe} < fort.5 > metals.6")
-    except:
-        print("\n Model run has encountered an error. Exiting...")
-        sys.exit(0)
-    print("LTE metals model completed!")
+
+    ntries=10
+    model_broke = False
+    for i in range(ntries):
+        try:
+            os.system(f"{TLEXE} < fort.5 > metals.6")
+            out7    = open(PATH+f'scenarios/{scen}/metals/metals.6','r').read()
+            if ('FINAL MODEL ATMOSPHERE' not in out7) or ('NaN' in out7):
+                print(f"Attempt {i+1}:  NaN's in output.")
+                model_broke = True
+            else:
+                model_broke = False
+                break
+        except:
+            print(f"Attempt {i+1}:   Model run has encountered an error.")
+            model_broke = True
+
     os.chdir(HOME)
+    if model_broke:
+        log = open('log.dat','a')
+        log.write(scen+'\tNLTE'+'\n')
+        log.close()
+    else:
+        print("LTE metals model completed!")
+    
 
 ###################################################################################################
 
@@ -230,6 +257,7 @@ def synspec(scen:str,species_dict,imode:int=0,lammin:int=900,lammax:int=10000):
     else:
         subprocess.run(['cp','../lte/fort.7','fort.8'])
         subprocess.run(['cp','../lte/fort.5','fort.5'])
+        
     # run SYNSPEC
     try:
         os.system(f'{SYNEXE} < fort.5 > fort.6')
@@ -326,7 +354,7 @@ def tlusty():   # or main
 
                 for s in sp_to_update:
                     species_dict[s]['abn'] = np.format_float_scientific(scale*rel_abn_si[s],precision=5)
-                    if s in ['al','ca','cr','mn','ni']:
+                    if s in ['cr','mn','ni']:
                         species_dict[s]['mode'] = 1
                     else:
                         species_dict[s]['mode'] = 2
@@ -345,24 +373,18 @@ def tlusty():   # or main
 
     # Initial LTE model
     # WARNING: do not do a pure He model at all, can't validate that it is correct
-    if refhe:
-        pureHemodel(scen=scen,teff=teff,log_g=log_g)
-    else:
-        pureHmodel(scen=scen,teff=teff,log_g=log_g)
+    success = pureHmodel(scen=scen,teff=teff,log_g=log_g)
 
-    if species_dict != newSpeciesDict():
+    if success and (species_dict != newSpeciesDict()):
         metals(scen=scen,teff=teff,log_g=log_g,spdict=species_dict,is_lte=True)
 
-    if do_synspec:
+    if success and do_synspec:
         synspec(scen=scen,species_dict=species_dict,imode=imode,lammin=lammin,lammax=lammax)
 
     end = time.time()
     print(f"Time elapsed:   {round(end-start,3)}s")
 
 ###################################################################################################
-
-
-
 
 
 

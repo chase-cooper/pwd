@@ -2,7 +2,7 @@
 from astropy.io import fits
 import matplotlib.pyplot as plt
 import numpy as np
-import os
+import os,subprocess
 from scipy.interpolate import LinearNDInterpolator
 from consts import *
 
@@ -147,20 +147,57 @@ def model_flux_to_phot_fname(fname):
 
     return np.concat([sdss_model_flux,pans_model_flux,skym_model_flux])
 
-fig,ax = plt.subplots()
+# dat = np.genfromtxt('tlusty/scenarios/test/synspec/fort.7')
+# plt.plot(dat[:,0],dat[:,1],label='w QMS')
 
-dat = np.genfromtxt(SCEN+'/944/synspec/fort.7')
-ax.plot(dat[:,0],dat[:,1])
+# dat = np.genfromtxt('tlusty/scenarios/test2/synspec/fort.7')
+# plt.plot(dat[:,0],dat[:,1],label='w IHYDDK')
+# plt.legend()
+# plt.show()
 
-for val in np.arange(-6.5,-4.5,0.2):
-    valstr = np.format_float_positional(val,precision=1)
+# input()
+# input()
 
-    dat = np.genfromtxt(SCEN+f'/944/synspec/14_{valstr}.7')
-    ax.plot(dat[:,0],dat[:,1],label=valstr)
 
-ax.set_yscale('log')
-ax.legend()
-plt.show()
+
+### GRID, 10000 <= T < 15000
+
+count = 0
+for t in np.arange(10000,14999,500):
+    tstr = str(t)
+
+    for g in np.arange(6,9.1,0.5):
+        gstr = np.format_float_positional(g,precision=1,min_digits=1)
+
+        for abn in np.arange(-9,-3.9,0.5):
+            abnstr = np.format_float_positional(abn,precision=1,min_digits=1)
+
+            # Run the model
+            scen    = f"t{tstr}_g{gstr}_si{abnstr}"
+            print(scen)
+
+            if scen in os.listdir(SCEN):
+                continue
+
+            subprocess.run(['python','tlusty.py',scen,tstr,gstr,f"chondrite={abnstr}"])
+
+            # Remove large files
+            try:
+                os.remove(SCEN+f'/{scen}/lte/fort.71')
+                os.remove(SCEN+f'/{scen}/lte/fort.81')
+                os.remove(SCEN+f'/{scen}/lte/fort.82')
+                os.remove(SCEN+f'/{scen}/lte/fort.83')
+                os.remove(SCEN+f'/{scen}/metals/fort.71')
+                os.remove(SCEN+f'/{scen}/metals/fort.81')
+                os.remove(SCEN+f'/{scen}/metals/fort.82')
+                os.remove(SCEN+f'/{scen}/metals/fort.83')
+
+            except FileNotFoundError:
+                continue
+
+            count += 1
+            
+print(count)
 
 
 

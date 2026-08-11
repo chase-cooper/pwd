@@ -78,10 +78,10 @@ def writeUnit5(path:str,teff:float,log_g:float,species_dict:dict=newSpeciesDict(
     if species_dict['h']['mode']==2:
         f.write("""  1   0   16   0   0     0   ' H 1' './data/h1s16.dat'
   1   1   1    1   0     0   ' H 2' ' '\n""")
-    if species_dict['he']['mode']==2:
-        f.write("""  2   0   24   0   0     0   'He 1' './data/he1.dat'
-  2   1   20   0   0     0   'He 2' './data/he2.dat'
-  2   2   1    1   0     0   'He 3' ' '\n""")
+#     if species_dict['he']['mode']==2:
+#         f.write("""  2   0   24   0   0     0   'He 1' './data/he1.dat'
+#   2   1   20   0   0     0   'He 2' './data/he2.dat'
+#   2   2   1    1   0     0   'He 3' ' '\n""")
     if species_dict['c']['mode']==2:
         f.write("""  6   0   40   0   0     0   ' C 1' './data/c1.dat'
   6   1   22   0   0     0   ' C 2' './data/c2.dat'
@@ -91,30 +91,30 @@ def writeUnit5(path:str,teff:float,log_g:float,species_dict:dict=newSpeciesDict(
 #   6   4   1    1   0     0   ' C 5' ' '\n""")
     if species_dict['n']['mode']==2:
         f.write("""  7   0   34   0   0     0   ' N 1' './data/n1.dat'
-  7   1   42   0   0     0   ' N 2' './data/n2_32+10lev.dat'
-  7   2   1    1   0     0   ' N 3' ' '\n""")
+  7   1   1    1   0     0   ' N 2' ' '\n""")
+#   7   1   42   0   0     0   ' N 2' './data/n2_32+10lev.dat'
 #   7   2   32   0   0     0   ' N 3' './data/n3.dat'
 #   7   3   48   0   0     0   ' N 4' './data/n4_34+14lev.dat'
 #   7   4   16   0   0     0   ' N 5' './data/n5.dat'
 #   7   5   1    1   0     0   ' N 6' ' '\n""")
     if species_dict['o']['mode']==2:
         f.write("""  8   0   33   0   0     0   ' O 1' './data/o1_23+10lev.dat'
-  8   1   48   0   0     0   ' O 2' './data/o2_36+12lev.dat'
-  8   2   41   0   0     0   ' O 3' './data/o3_28+13lev.dat'
-  8   3   1    1   0     0   ' O 4' ' '\n""")
+  8   1   1    1   0     0   ' O 1' ' '\n""")
+#   8   1   48   0   0     0   ' O 2' './data/o2_36+12lev.dat'
+#   8   2   41   0   0     0   ' O 3' './data/o3_28+13lev.dat'
 #   8   3   39   0   0     0   ' O 4' './data/o4.dat'
 #   8   4   6    0   0     0   ' O 5' './data/o5.dat'
 #   8   5   1    1   0     0   ' O 6' ' '\n""")
-    if species_dict['na']['mode']==2:
-        f.write("""  11  0   32   0   0     0   'Na 1' './data/na1.t'
-  11  1   8    1   0     0   'Na 2' ' '\n""")
+#     if species_dict['na']['mode']==2:
+#         f.write("""  11  0   32   0   0     0   'Na 1' './data/na1.t'
+#   11  1   8    1   0     0   'Na 2' ' '\n""")
     if species_dict['mg']['mode']==2:
         f.write("""  12  1   25   0   0     0   'Mg 2' './data/mg2.dat'
   12  2   1    1   0     0   'Mg 3' ' '\n""")
-#     if species_dict['al']['mode']==2:
-#         f.write("""  13  1   29   0   0     0   'Al 2' './data/al2_20+9lev.dat'
-#   13  2   23   0   0     0   'Al 3' './data/al3_19+4lev.dat'
-#   13  3   1    1   0     0   'Al 4' ' '\n""")
+    if species_dict['al']['mode']==2:
+        f.write("""  13  1   29   0   0     0   'Al 2' './data/al2_20+9lev.dat'
+  13  2   23   0   0     0   'Al 3' './data/al3_19+4lev.dat'
+  13  3   1    1   0     0   'Al 4' ' '\n""")
     if species_dict['si']['mode']==2:
         f.write("""  14  1   40   0   0     0   'Si 2' './data/si2_36+4lev.dat'
   14  2   30   0   0     0   'Si 3' './data/si3.dat'
@@ -123,12 +123,13 @@ def writeUnit5(path:str,teff:float,log_g:float,species_dict:dict=newSpeciesDict(
     if species_dict['s']['mode']==2:
         f.write("""  16  1   33   0   0     0   ' S 2' 'data/s2_23+10lev.dat'
   16  2   41   0   0     0   ' S 3' './data/s3_29+12lev.dat'
-  16  3   38   0   0     0   ' S 4' './data/s4_33+5lev.dat'
-  16  4   25   0   0     0   ' S 5' './data/s5_20+5lev.dat'
-  16  5   1    1   0     0   ' S 6' ' '\n""")
-#     if species_dict['ca']['mode']==2:
-#         f.write("""  20  1   
-# """)
+  16  3   1    1   0     0   ' S 4' ' '\n""")
+#   16  3   38   0   0     0   ' S 4' './data/s4_33+5lev.dat'
+#   16  4   25   0   0     0   ' S 5' './data/s5_20+5lev.dat'
+#   16  5   1    1   0     0   ' S 6' ' '\n""")
+    if species_dict['ca']['mode']==2:
+        f.write("""  20  1   32   0   0     0   'Ca 2' './data/ca2.t'
+  20  2   1    1   0     0   'Ca 3' ' '\n""")
     if species_dict['fe']['mode']==2:
         f.write("""  26  1   36   0   0     -1  'Fe 2' './data/fe2va.dat'
    0  0                             './data/gf2601.gam'

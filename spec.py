@@ -1,8 +1,13 @@
 from astropy.io import fits
+from astropy.table import Table
+from astropy.modeling import functional_models
+from astropy.convolution import convolve
+from astroquery.mast import Observations
+from scipy.interpolate import interp1d
 from consts import *
 import matplotlib.pyplot as plt
 import numpy as np
-import os,subprocess
+import os,subprocess,urllib
 
 
 # Given a scenario whose abundances you wish to fit, and a spectrum to which the scenario is fitted
@@ -10,12 +15,16 @@ import os,subprocess
 
 # For testing, I'm using a scenario, '944', with T = 17,000K, log(g) = 8, and a chondritic [Si/H]
 #   of -5.5. Values are approximately those derived by Rogers+24a.
+
 specf   = 'fits files/gd56fuv.fits'
+# specf   = 'fits files/WD0408-041.fits'
 scen    = 'gd56'
 
 dat     = np.genfromtxt(SCEN+f"/{scen}/synspec/fort.7")
 wvln    = dat[:,0]
 flux    = dat[:,1]
+
+
 
 ################################################################################################
 
@@ -140,7 +149,7 @@ def lsfParams(fname:str):
     """
     # Select the primary header
     fuvHeader0 = fits.getheader(fname, ext=0)
-    print(f"For the file {fname}, the relevant parameters are: ")
+    # print(f"For the file {fname}, the relevant parameters are: ")
 
     # Make a dictionary to store what you find here
     param_dict = {}
@@ -163,7 +172,7 @@ def lsfParams(fname:str):
             param_dict[hdrKeyword] = value
 
         # Print the key/value pairs
-        print(f"{hdrKeyword} = {value}")
+        # print(f"{hdrKeyword} = {value}")
 
     return param_dict
 
@@ -193,7 +202,7 @@ def fetch_files(det, grating, lpPos, cenwave, disptab):
         "home/hst/instrumentation/cos/"
         "performance/spectral-resolution/_documents/"
     )  
-    print(det)
+    # print(det)
 
     # Only one file for NUV
     if det == "NUV":
@@ -210,7 +219,7 @@ def fetch_files(det, grating, lpPos, cenwave, disptab):
     )
     
     # Where to save file to locally
-    print(f"Downloaded LSF file to {f"{datadir}/{LSF_file_name}"}")
+    # print(f"Downloaded LSF file to {f"{datadir}/{LSF_file_name}"}")
 
     # And we'll need to get the DISPTAB file as well
     disptab_path = f"{datadir}/{disptab}"
@@ -219,7 +228,7 @@ def fetch_files(det, grating, lpPos, cenwave, disptab):
         disptab_path
     )
     
-    print(f"Downloaded DISPTAB file to {disptab_path}")
+    # print(f"Downloaded DISPTAB file to {disptab_path}")
 
     return LSF_file_name, disptab_path
 
@@ -230,13 +239,13 @@ def read_lsf(filename):
     # Borrowed from HST Notebook on LSF convolution
     if "nuv_" in filename:
         ftype = "nuv"
-        print(f"Detector used: {ftype}")
+        # print(f"Detector used: {ftype}")
         hs = 1
 
     # Otherwise, assume its an FUV file
     else:
         ftype = "fuv"
-        print(f"Detector used: {ftype}")
+        # print(f"Detector used: {ftype}")
 
     hs = 0
     lsf = Table.read(filename,
@@ -581,7 +590,7 @@ def scaleModel(wvln,flux,sigma,wvln_m,flux_m):
     # Re-interpolate to observed spectrum points (not strictly necessary)
     # scaled_model_flux   = np.interp(wvln,scaled_model_wvln,scaled_model_flux)
 
-    # # Plot that shit
+    # Plot that shit
     # fig,ax = plt.subplots()
     # ax.plot(wvln,flux)
     # ax.plot(scaled_model_wvln,scaled_model_flux)
@@ -590,7 +599,7 @@ def scaleModel(wvln,flux,sigma,wvln_m,flux_m):
     return min_chi2,min_v,min_s
   
 # Function that finds best fit to a line using chi2 minimization, by varying abundance of a species
-def fit_line(spec:str,scen:str,anum:int,minabn,maxabn,ddex,linecen,width):
+def fit_line(spec:str,scen:str,anum:int,minabn,maxabn,ddex,linecen,width,plotit:bool=False):
 
     # Open and trim observed flux
     wvln_all,flux_all,sigma_all = openFile(spec)
@@ -607,7 +616,7 @@ def fit_line(spec:str,scen:str,anum:int,minabn,maxabn,ddex,linecen,width):
 
         # Open and trim model spectrum
         fnamem  = SCEN+f"/{scen}/synspec/{str(anum)}_{abnstr}.7"
-        wvln_m_all,flux_m_all   = openModel(fnamem)
+        wvln_m_all,flux_m_all   = convolveModel(fnamem,specf)
         wvln_m  = wvln_m_all[np.abs(wvln_m_all-linecen)<=width]
         flux_m  = flux_m_all[np.abs(wvln_m_all-linecen)<=width]
 
@@ -621,8 +630,9 @@ def fit_line(spec:str,scen:str,anum:int,minabn,maxabn,ddex,linecen,width):
 
     ### Derive best-fit value and errorbars
     bestfit = abns[np.argmax(probs)]
-    print(bestfit)
-    
+    # print(bestfit)
+
+    # Get PDF and CDF
     pdf     = probs/np.sum(probs)
     cdf     = np.zeros_like(probs)
     for i in range(len(probs)):
@@ -631,13 +641,43 @@ def fit_line(spec:str,scen:str,anum:int,minabn,maxabn,ddex,linecen,width):
     fit = np.polyfit(abns,cdf,deg=5)
     fit = np.poly1d(fit)
 
-    fig,ax = plt.subplots()
-    ax.plot(abns,cdf)
-    ax.plot(abns,fit(abns))
-    plt.show()
+    # Linearly nterpolate CDF
+    cdf_range   = np.arange(min(abns),max(abns),ddex/10)
+    cdf_gran    = np.interp(cdf_range,abns,cdf)
 
+    mid         = cdf_range[np.argmin(np.abs(cdf_gran - 0.5))]
+    sig_lo      = cdf_range[np.argmin(np.abs(cdf_gran - 0.32))-1]
+    sig_hi      = cdf_range[np.argmin(np.abs(cdf_gran - 0.68))+1]
+    diff_lo     = mid - sig_lo
+    diff_hi     = sig_hi - mid
 
-    
-alter_synspec_abn(scen=scen,anum=16,minabn=-7,maxabn=-5,ddex=0.2)
+    anum2str = {
+        6:  'C',
+        7:  'N',
+        8:  'O',
+        11: 'Na',
+        12: 'Mg',
+        13: 'Al',
+        14: 'Si',
+        16: 'S',
+        20: 'Ca',
+        26: 'Fe'
+    }
 
-fit_line(specf,scen,anum=14,minabn=-6.5,maxabn=-4.5,ddex=0.1,linecen=1265,width=1)
+    if plotit:
+        fig,ax = plt.subplots()
+        ax.plot(abns,pdf)
+        ax.vlines(x=[mid-diff_lo,mid,mid+diff_hi],ymin=0,ymax=max(pdf))
+        ax.set_title(r"$\log(\rm{Si/H}) = " + str(round(mid,2)) + r"_{-" + str(round(diff_lo,2)) + r"}^{+" + str(round(diff_hi,2)) + r"}$")
+        plt.show()
+        plt.close()
+
+    return mid,sig_lo,sig_hi
+
+# alter_synspec_abn(scen,anum=26,minabn=-6,maxabn=-4,ddex=0.2)
+
+# plt.plot(wvln,flux)
+# plt.show()
+# plt.close()
+
+fit_line(specf,scen,anum=16,minabn=-7,maxabn=-5.2,ddex=0.2,linecen=1195,width=1,plotit=True)
