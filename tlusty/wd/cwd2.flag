@@ -6,4 +6,4 @@ OPRMIN=1.e-3,ABROS0=1.
 TAUDIV=1.e-2,IDLST=0                                                            
 NDCGAP=5,ICONRE=0,IDEEPC=3                                                      
 ILGDER=1,CRFLIM=-10.,IMUCON=40,ICONRS=5                                         
-DIFT=0.01,DIFP=0.01        
+DIFT=0.01,DIFP=0.01   

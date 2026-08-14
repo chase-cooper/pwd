@@ -68,7 +68,7 @@ def writeUnit5(path:str,teff:float,log_g:float,species_dict:dict=newSpeciesDict(
     f.write('* mode abn modpf\n')
     for key in species_dict.keys():
         # if key=='h':continue
-        f.write(f'  {species_dict[key]['mode']}   {species_dict[key]['abn']}   0   ! {key}\n')
+        f.write(f"  {species_dict[key]['mode']}   {species_dict[key]['abn']}   0   ! {key}\n")
     
     # Third block: Explicit ions
     f.write('*\n* explicit ions\n*\n')

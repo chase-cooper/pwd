@@ -147,57 +147,51 @@ def model_flux_to_phot_fname(fname):
 
     return np.concat([sdss_model_flux,pans_model_flux,skym_model_flux])
 
-# dat = np.genfromtxt('tlusty/scenarios/test/synspec/fort.7')
-# plt.plot(dat[:,0],dat[:,1],label='w QMS')
+def openFile(fname:str):
+    """
+    Extract the spectrum from a single .fits file.
 
-# dat = np.genfromtxt('tlusty/scenarios/test2/synspec/fort.7')
-# plt.plot(dat[:,0],dat[:,1],label='w IHYDDK')
-# plt.legend()
-# plt.show()
+    I'm not sure that all files I'll be working with share the same format, so
+    this function may be edited on the fly.
+    """
+    with fits.open(fname) as hdu:
+        data_fuva   = hdu[1].data[1]
+        data_fuvb   = hdu[1].data[0]
+        wvln0       = np.hstack((data_fuva[3],data_fuvb[3]))    # Angstroms
+        flux0       = np.hstack((data_fuva[4],data_fuvb[4]))    # erg/cm^2/s/A
+        sigma0      = np.hstack((data_fuva[5],data_fuvb[5]))    # ^^^^^^^^^^^^
 
-# input()
-# input()
-
-
-
-### GRID, 10000 <= T < 15000
-
-count = 0
-for t in np.arange(10000,14999,500):
-    tstr = str(t)
-
-    for g in np.arange(6,9.1,0.5):
-        gstr = np.format_float_positional(g,precision=1,min_digits=1)
-
-        for abn in np.arange(-9,-3.9,0.5):
-            abnstr = np.format_float_positional(abn,precision=1,min_digits=1)
-
-            # Run the model
-            scen    = f"t{tstr}_g{gstr}_si{abnstr}"
-            print(scen)
-
-            if scen in os.listdir(SCEN):
-                continue
-
-            subprocess.run(['python','tlusty.py',scen,tstr,gstr,f"chondrite={abnstr}"])
-
-            # Remove large files
-            try:
-                os.remove(SCEN+f'/{scen}/lte/fort.71')
-                os.remove(SCEN+f'/{scen}/lte/fort.81')
-                os.remove(SCEN+f'/{scen}/lte/fort.82')
-                os.remove(SCEN+f'/{scen}/lte/fort.83')
-                os.remove(SCEN+f'/{scen}/metals/fort.71')
-                os.remove(SCEN+f'/{scen}/metals/fort.81')
-                os.remove(SCEN+f'/{scen}/metals/fort.82')
-                os.remove(SCEN+f'/{scen}/metals/fort.83')
-
-            except FileNotFoundError:
-                continue
-
-            count += 1
-            
-print(count)
+        # Remove zeros in spectrum
+        wvln,flux,sigma = [],[],[]
+        for i in range(len(wvln0)):
+            if flux0[i] != 0:
+                wvln.append(wvln0[i])
+                flux.append(flux0[i])
+                sigma.append(sigma0[i])
+        wvln = np.array(wvln)
+        flux = np.array(flux)
+        sigma= np.array(sigma)
+        hdu.close()
+    return wvln,flux,sigma
 
 
+fig,ax = plt.subplots()
 
+for val in np.arange(-9,-3.9,0.5):
+    valstr = np.format_float_positional(val,min_digits=1)
+    fname = f'tlusty/scenarios/t25000_g9.0_si{valstr}/synspec/fort.7'
+    dat = np.genfromtxt(fname)
+    ax.plot(dat[:,0],dat[:,1],label='valstr')
+
+ax.set_yscale('log')
+plt.show()
+plt.close()
+
+
+fname = 'fits files/gd56fuv.fits'
+x,y,yerr = openFile(fname)
+
+fig,ax = plt.subplots()
+# ax.plot(dat[:,0],dat[:,1])
+ax.errorbar(x,y,yerr)
+plt.show()

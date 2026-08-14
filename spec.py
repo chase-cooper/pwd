@@ -7,23 +7,15 @@ from scipy.interpolate import interp1d
 from consts import *
 import matplotlib.pyplot as plt
 import numpy as np
-import os,subprocess,urllib
+import os,subprocess,time
+import urllib.request
+
+import corner,emcee
+from multiprocessing import Pool
 
 
 # Given a scenario whose abundances you wish to fit, and a spectrum to which the scenario is fitted
 #   to, find best-fit abundances for a list of metal species.
-
-# For testing, I'm using a scenario, '944', with T = 17,000K, log(g) = 8, and a chondritic [Si/H]
-#   of -5.5. Values are approximately those derived by Rogers+24a.
-
-specf   = 'fits files/gd56fuv.fits'
-# specf   = 'fits files/WD0408-041.fits'
-scen    = 'gd56'
-
-dat     = np.genfromtxt(SCEN+f"/{scen}/synspec/fort.7")
-wvln    = dat[:,0]
-flux    = dat[:,1]
-
 
 
 ################################################################################################
@@ -35,70 +27,6 @@ def chi2(y,ymodel,yerr):
     """
     res = np.sum(np.nan_to_num((y-ymodel)**2/yerr**2,nan=0))
     return res/(len(y)-2)
-
-################################################################################################
-
-# Function that reruns SYNSPEC with an altered abundance of a specific abundance
-def alter_synspec_abn(scen:str,anum:int,minabn,maxabn,ddex):
-    """
-    Using a provided scenario's base spectrum, produce a range of spectra with the abundance of
-    a specified element 'species' ranging from 'minabn' to 'maxabn' in steps of 'ddex'.
-
-    Inputs:
-    - scen (string):    the scenario whose new spectra are being calculated
-    - anum (int):       The atomic number of the species whose abundance is changed
-    - minabn (int):     the minimum value of log(Sp/H)
-    - maxabn (int):     the maximum value of log(Sp/H)
-    - ddex (float):     the step in values of log(Sp/H)               
-    """
-
-    # Save base spectrum, if not already done
-    scendir = SCEN+f"/{scen}/synspec/"
-    
-    if not 'base.7' in os.listdir(scendir):
-        subprocess.run(['cp',f"{scendir}fort.7",f"{scendir}base.7"])
-
-    # Update fort.55 to reflect a change in abundances
-    file    = open(f"{scendir}fort.55",'r')
-    lines   = file.readlines()
-    file.close()
-
-    l = lines[1]
-    l = l.split()
-    l[-1] = '1\n'
-    lines[1] = '\t'.join(l)
-
-    file    = open(f"{scendir}fort.55",'w')
-    file.write('\t' + ''.join(lines))
-    file.close()
-
-    ### Iteratively run SYNSPEC with new abundances
-
-    abn     = minabn
-    while abn <= maxabn:
-        
-        val     = 10**abn
-        valstr  = np.format_float_scientific(val,precision=3)
-        if f"{anum}_{str(round(abn,1))}.7" in os.listdir(scendir):
-            abn += ddex
-            continue
-
-        # Write file
-        file = open(f"{scendir}fort.56",'w+')
-        file.write('1\n')
-        file.write(str(anum)+'\t'+valstr)
-        file.close()
-
-        # Run SYNSPEC
-        os.chdir(scendir)
-        print(f"{anum}:  {valstr}")
-        print("Running SYNSPEC...")
-        os.system(f"{SYNEXE} < fort.5 > fort.6")
-        subprocess.run(['cp','fort.7',f"{anum}_{str(round(abn,1))}.7"])
-        os.chdir(HOME)
-
-        # Modify abundance
-        abn += ddex
 
 ##########################################################################################
 
@@ -516,7 +444,7 @@ def convolve_lsf(wavelength, spec, cenwave, lsf_file, disptab, detector="FUV"):
     # Remember, not the same length as input spectrum data!
     return wave_cos, final_spec  
 
-def convolveModel(fnamem,fname):
+def convolveModelFromFile(fnamem,fname):
     """
     A function that simply puts all the previous steps together. Returns the
     convolved model spectrum
@@ -529,77 +457,218 @@ def convolveModel(fnamem,fname):
     wvln_m,spec_m = convolve_lsf(wvln_m,spec_m,cenwave=params['CENWAVE'],lsf_file=lsf_file,disptab=disp_file,detector=params['DETECTOR'])
     return wvln_m,spec_m
 
+def convolveModel(wvln,flux,fname):
+    """
+    A function that simply puts all the previous steps together. Returns the
+    convolved model spectrum
+    """
+    params  = lsfParams(fname)
+    lsf_file,disp_file  = fetch_files(*params.values())
+    lsf_file = 'hstdata/'+lsf_file
+
+    wvln_m,spec_m = wvln,flux
+    wvln_m,spec_m = convolve_lsf(wvln_m,spec_m,cenwave=params['CENWAVE'],lsf_file=lsf_file,disptab=disp_file,detector=params['DETECTOR'])
+    return wvln_m,spec_m
+
 ##########################################################################################
 
-### Function to scale a modeled spectrum up to an observed spectrum, fitting for scale factor
-###     and radial velocity
-def scaleModel(wvln,flux,sigma,wvln_m,flux_m):
+def trilinear_interp(teff,logg,abn,spec_dict):
     """
-    Fit an observed spectrum (or stacked spectrum) with a modeled one, 
-    adjusting for a scale factor and Doppler shift.
+    Given values for T_eff, log(g), and chondritic silicon abundance, interpolate over the
+    model grid to get an approximate spectrum.
     """
+
+    # From values, get adjacent grid points
+    t_lo        = teff - (teff % 500)
+    t_lo_str    = str(int(t_lo))
+    t_hi        = t_lo + 500
+    t_hi_str    = str(int(t_hi))
+    diff_t      = teff - t_lo
+
+    logg_lo     = logg - (logg % 0.5)
+    logg_lo_str = np.format_float_positional(logg_lo,min_digits=1)
+    logg_hi     = logg_lo + 0.5
+    logg_hi_str = np.format_float_positional(logg_hi,min_digits=1)
+    diff_logg   = logg - logg_lo
+
+    abn_lo      = abn - (abn % 0.5)
+    abn_lo_str  = np.format_float_positional(abn_lo,min_digits=1)
+    abn_hi      = abn_lo + 0.5
+    abn_hi_str  = np.format_float_positional(abn_hi,min_digits=1)
+    diff_abn    = abn - abn_lo
+
+    # print(t_lo_str,t_hi_str,logg_lo_str,logg_hi_str,abn_lo_str,abn_hi_str)
+
+    # File names of adjacent model spectra
+    # root        = 'tlusty/scenarios/'
+    root    = 'tlusty/polluted white dwarfs grid/'
+
+    # spec000     = np.genfromtxt(root + f"t{t_lo_str}_g{logg_lo_str}_si{abn_lo_str}"+"/synspec/fort.7")
+    # spec001     = np.genfromtxt(root + f"t{t_lo_str}_g{logg_lo_str}_si{abn_hi_str}"+"/synspec/fort.7")
+    # spec010     = np.genfromtxt(root + f"t{t_lo_str}_g{logg_hi_str}_si{abn_lo_str}"+"/synspec/fort.7")
+    # spec011     = np.genfromtxt(root + f"t{t_lo_str}_g{logg_hi_str}_si{abn_hi_str}"+"/synspec/fort.7")
+    # spec100     = np.genfromtxt(root + f"t{t_hi_str}_g{logg_lo_str}_si{abn_lo_str}"+"/synspec/fort.7")
+    # spec101     = np.genfromtxt(root + f"t{t_hi_str}_g{logg_lo_str}_si{abn_hi_str}"+"/synspec/fort.7")
+    # spec110     = np.genfromtxt(root + f"t{t_hi_str}_g{logg_hi_str}_si{abn_lo_str}"+"/synspec/fort.7")
+    # spec111     = np.genfromtxt(root + f"t{t_hi_str}_g{logg_hi_str}_si{abn_hi_str}"+"/synspec/fort.7")
+    spec000 = spec_dict[f"t{t_lo_str}_g{logg_lo_str}_si{abn_lo_str}"]
+    spec001 = spec_dict[f"t{t_lo_str}_g{logg_lo_str}_si{abn_hi_str}"]
+    spec010 = spec_dict[f"t{t_lo_str}_g{logg_hi_str}_si{abn_lo_str}"]
+    spec011 = spec_dict[f"t{t_lo_str}_g{logg_hi_str}_si{abn_hi_str}"]
+    spec100 = spec_dict[f"t{t_hi_str}_g{logg_lo_str}_si{abn_lo_str}"]
+    spec101 = spec_dict[f"t{t_hi_str}_g{logg_lo_str}_si{abn_hi_str}"]
+    spec110 = spec_dict[f"t{t_hi_str}_g{logg_hi_str}_si{abn_lo_str}"]
+    spec111 = spec_dict[f"t{t_hi_str}_g{logg_hi_str}_si{abn_hi_str}"]
+
+    ### Interpolate. Wavelength points are those of spec000
+    wvln        = spec000['wvln']
+
+    # Interpolate over abundances
+    spec00x     = spec000['flux'] + np.interp(wvln,spec001['wvln'],spec001['flux']) * diff_abn/0.5
+    spec01x     = np.interp(wvln,spec010['wvln'],spec010['flux'])*(1-diff_abn/0.5) + np.interp(wvln,spec011['wvln'],spec011['flux'])*diff_abn/0.5
+    spec10x     = np.interp(wvln,spec100['wvln'],spec100['flux'])*(1-diff_abn/0.5) + np.interp(wvln,spec101['wvln'],spec101['flux'])*diff_abn/0.5
+    spec11x     = np.interp(wvln,spec110['wvln'],spec110['flux'])*(1-diff_abn/0.5) + np.interp(wvln,spec111['wvln'],spec11['flux'])*diff_abn/0.5
+
+    # Interpolate over log(g)
+    spec0xx     = spec00x*(1-diff_logg/0.5) + spec01x*diff_logg/0.5
+    spec1xx     = spec10x*(1-diff_logg/0.5) + spec11x*diff_logg/0.5
+
+    # Interpolate over T_eff for final spectrum
+    spec_final  = spec0xx*(1-diff_t/500) + spec1xx*diff_t/500
+
+    # Plot result compared to extremes
+    if False:
+        fig,ax = plt.subplots()
+
+        # ax.plot(spec000[:,0],spec000[:,1],c='salmon',label=t_lo_str+" K, "+logg_lo_str+" dex, "+abn_lo_str+" dex")
+        # ax.plot(spec111[:,0],spec111[:,1],c='cornflowerblue',label=t_hi_str+" K, "+logg_hi_str+" dex, "+abn_hi_str+" dex")
+        ax.plot(spec000[:,0],spec000[:,1],c='salmon')
+        ax.plot(spec001[:,0],spec001[:,1],c='salmon')
+        ax.plot(spec010[:,0],spec010[:,1],c='salmon')
+        ax.plot(spec011[:,0],spec011[:,1],c='salmon')
+        ax.plot(spec100[:,0],spec100[:,1],c='salmon')
+        ax.plot(spec101[:,0],spec101[:,1],c='salmon')
+        ax.plot(spec110[:,0],spec110[:,1],c='salmon')
+        ax.plot(spec111[:,0],spec111[:,1],c='salmon')
+        ax.plot(wvln,spec_final,c='black',label="Final")
+
+        ax.set_yscale("log")
+        ax.legend()
+
+        plt.show()
+        plt.close()
+
+    return wvln,spec_final
+
+def scaleUpModelSpectrum(wvln_model,flux_model,wvln_obs,flux_obs,sigma_obs):
+    """
+    Use chi2 fitting to find and apply the best scale factor to a modeled spectrum so it fits
+    an observed spectrum
+    """
+
+    guess = np.average(flux_obs) / np.average(flux_model)
+    log_guess = np.log10(guess)
+
+    min_s = 1
+    min_score = 1e100
+    for s in np.logspace(log_guess-1,log_guess+1,100):
+        scaled_flux = flux_model * s
+        scaled_flux = np.interp(wvln_obs,wvln_model,scaled_flux)
+        score = chi2(flux_obs,scaled_flux,sigma_obs)
+        if score < min_score:
+            min_score = score
+            min_s = s
+
+    return wvln_model,flux_model*min_s
+
+################################################################################################
+
+# Function that reruns SYNSPEC with an altered abundance of a specific abundance
+def alter_synspec_abn(scen:str,anum:int,minabn,maxabn,ddex):
+    """
+    Using a provided scenario's base spectrum, produce a range of spectra with the abundance of
+    a specified element 'species' ranging from 'minabn' to 'maxabn' in steps of 'ddex'.
+
+    Inputs:
+    - scen (string):    the scenario whose new spectra are being calculated
+    - anum (int):       The atomic number of the species whose abundance is changed
+    - minabn (int):     the minimum value of log(Sp/H)
+    - maxabn (int):     the maximum value of log(Sp/H)
+    - ddex (float):     the step in values of log(Sp/H)               
+    """
+
+    # Save base spectrum, if not already done
+    scendir = SCEN+f"/{scen}/synspec/"
     
-    # Get model data (usually my model data, but others work fine)
-    model_wvln  = wvln_m
-    model_flux  = np.interp(wvln,model_wvln,flux_m,left=0,right=0) # Interpolate at observed spectrum points
+    if not 'base.7' in os.listdir(scendir):
+        subprocess.run(['cp',f"{scendir}fort.7",f"{scendir}base.7"])
 
-    # Rough scale fit to get approximate scale factor
-    min_s   = 1
-    min_score = 1e20
-    for s in np.logspace(-30,0,num=5000):
-        scaled_model_flux   = model_flux*s
-        # score = np.sum(np.abs(flux-scaled_model_flux))
-        score   = chi2(flux,scaled_model_flux,sigma)
-        if score<min_score:
-            min_s=s
-            min_score=score
-    
-    # Proper chi2 grid; doppler shift fitting is pretty jank atm so don't trust it
-    n = 50
-    v_grid      = np.linspace(-100,100,n)
-    s_grid      = np.logspace(np.log10(min_s)-1,np.log10(min_s)+1,n)
-    chi2_grid   = np.zeros((n,n))
-    for i in range(n):
-        v = v_grid[i]
-        beta = v/300_000
-        for j in range(n):
-            s = s_grid[j]
+    # Update fort.55 to reflect a change in abundances
+    file    = open(f"{scendir}fort.55",'r')
+    lines   = file.readlines()
+    file.close()
 
-            # Scale model flux
-            scaled_model_wvln   = wvln*np.sqrt((1-beta)/(1+beta))
-            scaled_model_flux   = model_flux*s
+    l = lines[1]
+    l = l.split()
+    l[-1] = '1\n'
+    lines[1] = '\t'.join(l)
 
-            # Re-interpolate to observed spectrum points
-            scaled_model_flux   = np.interp(wvln,scaled_model_wvln,scaled_model_flux)
-            score = chi2(flux,scaled_model_flux,sigma)
-            chi2_grid[i,j] = score
-    
-    # Fetch chi2 minimum
-    ind_v,ind_s = np.unravel_index(np.argmin(chi2_grid),shape=(n,n))
-    min_chi2    = chi2_grid[ind_v][ind_s]
-    min_v       = v_grid[ind_v]
-    min_s       = s_grid[ind_s]
-    print(f"Chi-2 minimum:              {min_chi2}")
-    print(f"Best-fit flux scale factor: {min_s}")
-    print(f"Best-fit Doppler shift:     {min_v}km/s")
+    file    = open(f"{scendir}fort.55",'w')
+    file.write('\t' + ''.join(lines))
+    file.close()
 
-    # Rescale model flux for plotting
-    beta        = min_v/300_000 # again, jank; trusting this leads to offset line features
-    scaled_model_wvln   = wvln*np.sqrt((1-beta)/(1+beta))
-    scaled_model_flux   = model_flux*min_s
-    # Re-interpolate to observed spectrum points (not strictly necessary)
-    # scaled_model_flux   = np.interp(wvln,scaled_model_wvln,scaled_model_flux)
+    # Link files
+    os.chdir(scendir)
+    subprocess.run(['ln','-s','-f',PATH+'/data','data'])
+    subprocess.run(['ln','-s','-f',FLAG,'cwd.flag'])
 
-    # Plot that shit
-    # fig,ax = plt.subplots()
-    # ax.plot(wvln,flux)
-    # ax.plot(scaled_model_wvln,scaled_model_flux)
-    # plt.show()
+    # Rebuild line list
+    subprocess.run(['cp',PATH+'/data/gfATO.dat','fort.19'])
+    f = open('fort.19','r')
+    lines = f.read().split('\n')
+    f.close()
 
-    return min_chi2,min_v,min_s
-  
+    f = open('fort.19','w')
+    for line in lines[:-1]:
+        elem = int(line[13:15])
+        if int(elem)==anum:
+            f.write(line+'\n')
+    f.close()
+
+    ### Iteratively run SYNSPEC with new abundances
+    abn     = minabn
+    while abn <= maxabn:
+        
+        val     = 10**abn
+        valstr  = np.format_float_scientific(val,precision=3)
+        abnstr  = np.format_float_positional(abn,precision=1,min_digits=1)
+        if f"{anum}_{abnstr}.7" in os.listdir(scendir):
+            abn += ddex
+            continue
+
+        # Write file
+        file = open("fort.56",'w+')
+        file.write('1\n')
+        file.write(str(anum)+'\t'+valstr)
+        file.close()
+
+        # Run SYNSPEC
+        # print(f"{anum}:  {valstr}")
+        # print("Running SYNSPEC...")
+        os.system(f"{SYNEXE} < fort.5 > fort.6")
+        subprocess.run(['cp','fort.7',f"{anum}_{abnstr}.7"])
+        
+        # Modify abundance
+        abn += ddex
+
+    os.remove('data')
+    os.remove('cwd.flag')
+    os.remove('fort.19')
+    os.chdir(HOME)
+
 # Function that finds best fit to a line using chi2 minimization, by varying abundance of a species
-def fit_line(spec:str,scen:str,anum:int,minabn,maxabn,ddex,linecen,width,plotit:bool=False):
+#   and radial velocity?
+def fit_line(spec:str,scen:str,anum:int,minabn,maxabn,ddex,linecen,width):
 
     # Open and trim observed flux
     wvln_all,flux_all,sigma_all = openFile(spec)
@@ -608,76 +677,223 @@ def fit_line(spec:str,scen:str,anum:int,minabn,maxabn,ddex,linecen,width,plotit:
     flux    = flux_all[np.abs(wvln_all-linecen)<=width]
     sigma   = sigma_all[np.abs(wvln_all-linecen)<=width]
 
+    vrad_range  = np.arange(-50,50,1)
+    abn_range   = np.arange(minabn,maxabn+ddex/2,ddex)
+    chi2_grid = np.zeros((len(abn_range),len(vrad_range)))
+
     abns,probs = [],[]
 
-    abn     = minabn
-    while abn <= maxabn:
+    for i in range(len(abn_range)):
+        abn = abn_range[i]
         abnstr  = round(abn,1)
 
-        # Open and trim model spectrum
+        # Open model spectrum
         fnamem  = SCEN+f"/{scen}/synspec/{str(anum)}_{abnstr}.7"
-        wvln_m_all,flux_m_all   = convolveModel(fnamem,specf)
-        wvln_m  = wvln_m_all[np.abs(wvln_m_all-linecen)<=width]
-        flux_m  = flux_m_all[np.abs(wvln_m_all-linecen)<=width]
+        wvln_m_all,flux_m_all   = openModel(fnamem)
+        wvln_m_all,flux_m_all   = convolveModel(wvln_m_all,flux_m_all,spec)
 
-        # Fit spectra segments
-        min_chi2,min_v,min_s = scaleModel(wvln,flux,sigma,wvln_m,flux_m)
-        prob    = np.exp(-0.5*min_chi2)
-        abns.append(abn)
-        probs.append(prob)
+        for j in range(len(vrad_range)):
+            vrad = vrad_range[j]
 
-        abn += ddex
+            # Doppler shift spectrum
+            beta = vrad/3e5
+            wvln_m = wvln_m_all * np.sqrt( (1 + beta) / (1 - beta))
+            wvln_m = wvln_m[np.abs(wvln_m_all-linecen)<=width]
+            flux_m  = flux_m_all[np.abs(wvln_m_all-linecen)<=width]
 
-    ### Derive best-fit value and errorbars
-    bestfit = abns[np.argmax(probs)]
-    # print(bestfit)
+            # Fit spectra segments
+            wvln_m,flux_m = scaleUpModelSpectrum(wvln_m,flux_m,wvln,flux,sigma)
+            flux_m = np.interp(wvln,wvln_m,flux_m)
+            min_chi2 = chi2(flux,flux_m,sigma)
+            chi2_grid[i,j] = min_chi2
 
-    # Get PDF and CDF
-    pdf     = probs/np.sum(probs)
-    cdf     = np.zeros_like(probs)
-    for i in range(len(probs)):
-        cdf[i] = np.sum(pdf[:i+1])
+    res = np.argmin(chi2_grid)
+    min_chi2 = np.min(chi2_grid)
+    min_abn_ind,min_vrad_ind = np.unravel_index(res,chi2_grid.shape)
+    min_abn     = np.format_float_positional(abn_range[min_abn_ind],precision=1,min_digits=1)
+    min_vrad    = vrad_range[min_vrad_ind]
+    return min_abn,min_vrad,min_chi2
 
-    fit = np.polyfit(abns,cdf,deg=5)
-    fit = np.poly1d(fit)
+    # # Retrieve best fit spectrum
+    # fname = SCEN+f"/{scen}/synspec/{str(anum)}_{min_abn}.7"
+    # wvln_m,flux_m = openModel(fname)
+    # wvln_m,flux_m = convolveModel(wvln_m,flux_m,spec)
 
-    # Linearly nterpolate CDF
-    cdf_range   = np.arange(min(abns),max(abns),ddex/10)
-    cdf_gran    = np.interp(cdf_range,abns,cdf)
+    # # Doppler shift spectrum
+    # beta            = min_vrad/3e5
+    # wvln_m          = wvln_m * np.sqrt( (1 + beta) / (1 - beta))
 
-    mid         = cdf_range[np.argmin(np.abs(cdf_gran - 0.5))]
-    sig_lo      = cdf_range[np.argmin(np.abs(cdf_gran - 0.32))-1]
-    sig_hi      = cdf_range[np.argmin(np.abs(cdf_gran - 0.68))+1]
-    diff_lo     = mid - sig_lo
-    diff_hi     = sig_hi - mid
+    # wvln_m,flux_m = scaleUpModelSpectrum(wvln_m,flux_m,wvln,flux,sigma)
 
-    anum2str = {
-        6:  'C',
-        7:  'N',
-        8:  'O',
-        11: 'Na',
-        12: 'Mg',
-        13: 'Al',
-        14: 'Si',
-        16: 'S',
-        20: 'Ca',
-        26: 'Fe'
-    }
+    # fig,ax = plt.subplots()
+    # ax.errorbar(wvln,flux,sigma)
+    # ax.plot(wvln_m,flux_m,zorder=100)
+    # plt.show()
+    # plt.close()
 
-    if plotit:
-        fig,ax = plt.subplots()
-        ax.plot(abns,pdf)
-        ax.vlines(x=[mid-diff_lo,mid,mid+diff_hi],ymin=0,ymax=max(pdf))
-        ax.set_title(r"$\log(\rm{Si/H}) = " + str(round(mid,2)) + r"_{-" + str(round(diff_lo,2)) + r"}^{+" + str(round(diff_hi,2)) + r"}$")
-        plt.show()
-        plt.close()
+    # fig,ax = plt.subplots()
+    # ax.imshow(chi2_grid)
+    # plt.show()
 
-    return mid,sig_lo,sig_hi
+################################################################################################
 
-# alter_synspec_abn(scen,anum=26,minabn=-6,maxabn=-4,ddex=0.2)
+def log_prior(theta):
+    """
+    Calculate prior likelihood. Assuming flat priors for everything.
+    """
+    teff,logg,abn,vrad = theta
 
-# plt.plot(wvln,flux)
+    # Constraints on parameters
+    if (teff < 10000) or (teff > 25000)\
+    or (logg < 6) or (logg > 9)\
+    or (abn < -9) or (abn > -4)\
+    or (vrad < -100) or (vrad > 100):
+        return -np.inf
+
+    else:
+        return 0
+
+def log_likelihood(theta,spec_dict,specfile,conv_args):
+    """
+    Calculate the log-likelihood of a forward model with parameters theta explaining the observed
+    data in file specfile.
+    """
+
+    # Observed data
+    x,y,y_err = openFile(specfile)
+
+    # Parameters
+    teff,logg,abn,vrad = theta
+
+    # Produce forward model
+    wvln_model,flux_model = trilinear_interp(teff,logg,abn,spec_dict)
+
+    # Apply Doppler shift
+    beta = vrad/3e5
+    wvln_model *= np.sqrt( (1+beta) / (1-beta) )
+
+    # Convolve model
+    wvln_model,flux_model = convolve_lsf(wvln_model,flux_model,*conv_args)
+
+    # Scale forward model to observed data
+    wvln_model,flux_model = scaleUpModelSpectrum(wvln_model,flux_model,x,y,y_err)
+    flux_model = np.interp(x,wvln_model,flux_model)
+
+    score = chi2(y,flux_model,y_err)
+    return -0.5*score
+
+def log_prob(theta,spec_dict,specfile,conv_args):
+    lp = log_prior(theta)
+    if not np.isfinite(lp):
+        return -np.inf
+    else:
+        return lp + log_likelihood(theta,spec_dict,specfile,conv_args)
+
+def specfit_MCMC():
+    pass
+
+################################################################################################
+
+file_obs = 'fits files/gd56fuv.fits'
+# x,y,yerr = openFile(file_obs)
+
+# fig,ax = plt.subplots()
+# ax.errorbar(x,y,yerr)
 # plt.show()
-# plt.close()
 
-fit_line(specf,scen,anum=16,minabn=-7,maxabn=-5.2,ddex=0.2,linecen=1195,width=1,plotit=True)
+# Carbon
+
+# alter_synspec_abn('t15000_g8.0_si-6.5',
+#                   6,
+#                   -9,
+#                   -4,
+#                   0.2)
+
+# fit_line(file_obs,
+#          't15000_g8.0_si-6.5',
+#          6,
+#          -9,
+#          -4,
+#          0.2,
+#          1335,
+#          2)
+
+# Silicon
+
+   
+
+# best fit abn = -5.2, best fit vrad = 11 km/s
+
+# fit_line(file_obs,
+#          't15000_g8.0_si-6.5',
+#          14,
+#          -9,
+#          -4,
+#          0.2,
+#          1262.4,
+#          5)
+
+# best fit abn = -5.0, best fit vrad = 9 km/s
+
+
+input()
+input()
+
+############################
+### MCMC Quarantine zone ###
+############################
+
+# # Load spec dict
+# start = time.time()
+# spec_dict = {}
+
+# for t in np.arange(10000,25001,500):
+#     tstr = str(int(t))
+#     for g in np.arange(6,9.1,0.5):
+#         gstr = np.format_float_positional(g,min_digits=1)
+#         for abn in np.arange(-9,-3.9,0.5):
+#             abnstr = np.format_float_positional(abn,min_digits=1)
+#             scen = f"t{tstr}_g{gstr}_si{abnstr}"
+#             dat = np.genfromtxt('tlusty/scenarios/'+scen+'/synspec/fort.7')
+#             spec_dict[scen] = {
+#                 'wvln': dat[:,0],
+#                 'flux': dat[:,1]
+#             }
+# print(f"Loaded spec dict in {time.time()-start}s")
+
+# # Load necessary arguments for model convolution
+# params      = lsfParams(file_obs)
+# lsf_file,disp_file  = fetch_files(*params.values())
+# lsf_file    = 'hstdata/'+lsf_file
+# conv_args   = params['CENWAVE'],lsf_file,disp_file,params['DETECTOR']
+
+# # variables for emcee
+# ndim , nwalkers , nstep , nburn = 4 , 10 , 200 , 50
+
+# # initial guess of parameters
+# x0  = np.array([15000,8,-9,10])
+# pos = [x0*(1 + 1e-2*np.random.randn((4))) for w in range(nwalkers)]
+
+# # backup file
+# fn = 'simple emcee.h5'
+# backend = emcee.backends.HDFBackend( fn )
+# backend.reset( nwalkers , ndim )
+
+# # The big show
+# sampler = emcee.EnsembleSampler(nwalkers,ndim,log_prob,args=(spec_dict,file_obs,conv_args),backend=backend)
+# sampler.run_mcmc(pos,nstep,progress=True,skip_initial_state_check=True)
+
+# # Get results
+# reader  = emcee.backends.HDFBackend(fn)
+# nthin   = 2
+# samples = reader.get_chain(discard=nburn,thin=nthin,flat=True)
+
+# # Get best fitting model
+# lnprob  = reader.get_log_prob(discard=nburn,flat=True,thin=nthin)
+# lnpmax  = np.amax(lnprob)
+# xmax    = samples[np.where(lnprob==lnpmax)][0]
+# print(xmax)
+
+# # Plot results
+# fig     = corner.corner(samples,quantiles=[0.16,0.5,0.84],show_titles=True,labels=["T",r"$\log(g)$","[Si/H]",r"$v_{\rm rad}$"],range=[[10000,25000],[6,9],[-9,-4],[-100,100]])
+# plt.show()
