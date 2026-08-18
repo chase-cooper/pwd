@@ -289,7 +289,7 @@ def tlusty():   # or main
     do_synspec  = False
     imode       = 2
     lammin      = 900
-    lammax      = 5000
+    lammax      = 25000
 
     # Check for additional user arguments
     if len(sys.argv) > 4:

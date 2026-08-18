@@ -502,15 +502,6 @@ def trilinear_interp(teff,logg,abn,spec_dict):
     # File names of adjacent model spectra
     # root        = 'tlusty/scenarios/'
     root    = 'tlusty/polluted white dwarfs grid/'
-
-    # spec000     = np.genfromtxt(root + f"t{t_lo_str}_g{logg_lo_str}_si{abn_lo_str}"+"/synspec/fort.7")
-    # spec001     = np.genfromtxt(root + f"t{t_lo_str}_g{logg_lo_str}_si{abn_hi_str}"+"/synspec/fort.7")
-    # spec010     = np.genfromtxt(root + f"t{t_lo_str}_g{logg_hi_str}_si{abn_lo_str}"+"/synspec/fort.7")
-    # spec011     = np.genfromtxt(root + f"t{t_lo_str}_g{logg_hi_str}_si{abn_hi_str}"+"/synspec/fort.7")
-    # spec100     = np.genfromtxt(root + f"t{t_hi_str}_g{logg_lo_str}_si{abn_lo_str}"+"/synspec/fort.7")
-    # spec101     = np.genfromtxt(root + f"t{t_hi_str}_g{logg_lo_str}_si{abn_hi_str}"+"/synspec/fort.7")
-    # spec110     = np.genfromtxt(root + f"t{t_hi_str}_g{logg_hi_str}_si{abn_lo_str}"+"/synspec/fort.7")
-    # spec111     = np.genfromtxt(root + f"t{t_hi_str}_g{logg_hi_str}_si{abn_hi_str}"+"/synspec/fort.7")
     spec000 = spec_dict[f"t{t_lo_str}_g{logg_lo_str}_si{abn_lo_str}"]
     spec001 = spec_dict[f"t{t_lo_str}_g{logg_lo_str}_si{abn_hi_str}"]
     spec010 = spec_dict[f"t{t_lo_str}_g{logg_hi_str}_si{abn_lo_str}"]
@@ -668,7 +659,7 @@ def alter_synspec_abn(scen:str,anum:int,minabn,maxabn,ddex):
 
 # Function that finds best fit to a line using chi2 minimization, by varying abundance of a species
 #   and radial velocity?
-def fit_line(spec:str,scen:str,anum:int,minabn,maxabn,ddex,linecen,width):
+def fit_line(spec:str,scen:str,anum:int,minabn,maxabn,ddex,linecen,width,plotit:bool=False):
 
     # Open and trim observed flux
     wvln_all,flux_all,sigma_all = openFile(spec)
@@ -707,12 +698,37 @@ def fit_line(spec:str,scen:str,anum:int,minabn,maxabn,ddex,linecen,width):
             min_chi2 = chi2(flux,flux_m,sigma)
             chi2_grid[i,j] = min_chi2
 
+        # fig,ax = plt.subplots()
+        # ax.plot(wvln,flux_m,zorder=100)
+        # ax.plot(wvln,flux)
+        # ax.set_title(abnstr)
+        # plt.show()
+
     res = np.argmin(chi2_grid)
     min_chi2 = np.min(chi2_grid)
     min_abn_ind,min_vrad_ind = np.unravel_index(res,chi2_grid.shape)
     min_abn     = np.format_float_positional(abn_range[min_abn_ind],precision=1,min_digits=1)
     min_vrad    = vrad_range[min_vrad_ind]
-    return min_abn,min_vrad,min_chi2
+
+    prob_grid   = np.exp(-0.5*chi2_grid)
+    vrad_marg   = np.sum(prob_grid,axis=0)/np.sum(prob_grid)
+    abn_marg    = np.sum(prob_grid,axis=1)/np.sum(prob_grid)
+
+    if plotit:
+        
+
+        fig,ax = plt.subplots(ncols=2)
+        ax[0].plot(abn_range,abn_marg)
+        ax[0].set_title("Abundance")
+
+        ax[1].plot(vrad_range,vrad_marg)
+        ax[1].set_title("Radial velocity")
+
+        plt.show()
+        plt.close()
+
+    # return min_abn,min_vrad,min_chi2
+    return abn_range,abn_marg
 
     # # Retrieve best fit spectrum
     # fname = SCEN+f"/{scen}/synspec/{str(anum)}_{min_abn}.7"
@@ -795,11 +811,11 @@ def specfit_MCMC():
 ################################################################################################
 
 file_obs = 'fits files/gd56fuv.fits'
-# x,y,yerr = openFile(file_obs)
+x,y,yerr = openFile(file_obs)
 
-# fig,ax = plt.subplots()
-# ax.errorbar(x,y,yerr)
-# plt.show()
+fig,ax = plt.subplots()
+ax.errorbar(x,y,yerr)
+plt.show()
 
 # Carbon
 
@@ -809,15 +825,73 @@ file_obs = 'fits files/gd56fuv.fits'
 #                   -4,
 #                   0.2)
 
-# fit_line(file_obs,
+fig,ax = plt.subplots()
+
+# abn_range,si_prob = fit_line(file_obs,
 #          't15000_g8.0_si-6.5',
-#          6,
+#          14,
 #          -9,
 #          -4,
 #          0.2,
-#          1335,
-#          2)
+#          1299,
+#          2, plotit=False)
+# ax[0].plot(abn_range,si_prob,c=(1,0,0,0.3),label='1297-1301AA')
 
+# abn_range,si_prob = fit_line(file_obs,
+#          't15000_g8.0_si-6.5',
+#          14,
+#          -9,
+#          -4,
+#          0.2,
+#          1263,
+#          3, plotit=False)
+# ax.plot(abn_range,si_prob/np.max(si_prob),c=(0,1,0,0.3),label='1260-1266AA')
+
+# _,prob = fit_line(file_obs,
+#          't15000_g8.0_si-6.5',
+#          14,
+#          -9,
+#          -4,
+#          0.2,
+#          1309,
+#          2, plotit=False)
+# si_prob += prob
+# ax.plot(abn_range,prob/np.max(prob),c=(0,0,1,0.3),label='1307-1311AA')
+
+# _,prob = fit_line(file_obs,
+#          't15000_g8.0_si-6.5',
+#          14,
+#          -9,
+#          -4,
+#          0.2,
+#          1194,
+#          4, plotit=False)
+# si_prob += prob
+# ax.plot(abn_range,prob,c=(1,0,0,0.3),label='1190-1198AA')
+
+abn_range,si_prob = fit_line(file_obs,
+         't15000_g8.0_si-6.5',
+         6,
+         -9,
+         -4,
+         0.2,
+         1335,
+         2, plotit=False)
+
+pdf = si_prob/np.sum(si_prob)
+cdf = np.zeros_like(pdf)
+for i in range(len(pdf)):
+    cdf[i] = np.sum(pdf[:i+1])
+best   = abn_range[np.argmax(pdf)]
+sig_lo = abn_range[np.argmin(np.abs(cdf-0.16))]
+sig_hi = abn_range[np.argmin(np.abs(cdf-0.84))]
+
+ax.plot(abn_range,pdf/np.max(pdf),c='black')
+ax.set_xlabel("[C/H]")
+ax.set_ylabel("Relative probability")
+ax.legend()
+ax.vlines(x=[best,sig_lo,sig_hi],ymin=0,ymax=1,linestyles='dashed',colors='grey')
+plt.show()
 # Silicon
 
    

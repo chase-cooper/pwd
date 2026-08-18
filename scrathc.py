@@ -174,24 +174,18 @@ def openFile(fname:str):
         hdu.close()
     return wvln,flux,sigma
 
-
 fig,ax = plt.subplots()
 
-for val in np.arange(-9,-3.9,0.5):
-    valstr = np.format_float_positional(val,min_digits=1)
-    fname = f'tlusty/scenarios/t25000_g9.0_si{valstr}/synspec/fort.7'
-    dat = np.genfromtxt(fname)
-    ax.plot(dat[:,0],dat[:,1],label='valstr')
+if True:
+    tstr = '15000'
+    for g in np.arange(6,9.1,0.5):
+        gstr = np.format_float_positional(g,precision=1,min_digits=1)
 
+        scen = f"t{tstr}_g{gstr}"
+
+        dat = np.genfromtxt(f'tlusty/hydrogengrid/{scen}.spec')
+        ax.plot(dat[:,0],dat[:,1],label=gstr)
+
+ax.legend()
 ax.set_yscale('log')
-plt.show()
-plt.close()
-
-
-fname = 'fits files/gd56fuv.fits'
-x,y,yerr = openFile(fname)
-
-fig,ax = plt.subplots()
-# ax.plot(dat[:,0],dat[:,1])
-ax.errorbar(x,y,yerr)
 plt.show()
