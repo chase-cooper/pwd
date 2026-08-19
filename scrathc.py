@@ -2,7 +2,7 @@
 from astropy.io import fits
 import matplotlib.pyplot as plt
 import numpy as np
-import os,subprocess
+import os,subprocess,time
 from scipy.interpolate import LinearNDInterpolator
 from consts import *
 
@@ -147,7 +147,7 @@ def model_flux_to_phot_fname(fname):
 
     return np.concat([sdss_model_flux,pans_model_flux,skym_model_flux])
 
-def openFile(fname:str):
+def openCOSfile(fname:str):
     """
     Extract the spectrum from a single .fits file.
 
@@ -174,18 +174,112 @@ def openFile(fname:str):
         hdu.close()
     return wvln,flux,sigma
 
+###### Photometric forward model interpolation
+
+def loadSpectra():
+    # Spectrum dictionary
+    start = time.time()
+    print("Loading spectra...",end='')
+
+    spec_dict = {}
+    for t in np.arange(10000,25001,500):
+        tstr = str(t)
+        for g in np.arange(6,9.1,0.5):
+            gstr = np.format_float_positional(g,precision=1,min_digits=1)
+
+            scen = f"t{tstr}_g{gstr}"
+            spec_dict[scen] = {}
+
+            dat = np.genfromtxt(f'tlusty/hydrogengrid/{scen}.spec')
+            fwvln = dat[:,0]
+            fflux = dat[:,1]
+            spec_dict[scen] = {
+                'wvln':fwvln,
+                'flux':fflux
+            }
+
+    end = time.time()
+    print(f"Loaded spectra in {round(end-start,2)}s")
+    return spec_dict
+
+def interp_spectrum_dict(t,logg,spec_dict):
+    """
+    Given a temperature (anything) and log(g), linearly interpolate between
+    adjacent spectra to produce a new spectrum. Instead of reading in data from files, the data
+    are accessed through a dictionary where all the data has been preloaded.
+    """
+    t_lo        = t - (t % 500)
+    t_lo_str    = str(int(t_lo))
+    t_hi        = t_lo + 500
+    t_hi_str    = str(int(t_hi))
+    diff_t      = t - t_lo
+    print(t_lo_str,t_hi_str,diff_t)
+
+    logg_lo     = logg - (logg % 0.5)
+    logg_lo_str = np.format_float_positional(logg_lo,min_digits=1)
+    logg_hi     = logg_lo + 0.5
+    logg_hi_str = np.format_float_positional(logg_hi,min_digits=1)
+    diff_logg   = logg - logg_lo
+    print(logg_lo_str,logg_hi_str,diff_logg)
+
+    # Bilinear interpolation over model grid
+    spec00  = spec_dict[f"t{t_lo_str}_g{logg_lo_str}"]
+    spec01  = spec_dict[f"t{t_lo_str}_g{logg_hi_str}"]
+    spec10  = spec_dict[f"t{t_hi_str}_g{logg_lo_str}"]
+    spec11  = spec_dict[f"t{t_hi_str}_g{logg_hi_str}"]
+
+    # Interpolate fluxes to lower model wavelength spectrum
+    wvln    = spec00['wvln']
+
+    spec0x  = spec00['flux']*(1-diff_logg/0.5) + np.interp(wvln,spec01['wvln'],spec01['flux']) * diff_logg/0.5
+    spec1x  = np.interp(wvln,spec10['wvln'],spec10['flux'])*(1-diff_logg/0.5) + np.interp(wvln,spec11['wvln'],spec11['flux'])*diff_logg/0.5
+
+    spec    = spec0x*(1-diff_t/500) + spec1x*(diff_t/500)
+
+    fig,ax = plt.subplots(ncols=3)
+
+    ax[0].plot(spec00['wvln'],spec00['flux'],label='spec00') 
+    ax[0].plot(spec01['wvln'],spec01['flux'],label='spec01')
+    ax[0].plot(wvln,spec0x,label='spec0x')                     
+
+    ax[1].plot(spec10['wvln'],spec10['flux'],label='spec10')
+    ax[1].plot(spec11['wvln'],spec11['flux'],label='spec11')
+    ax[1].plot(wvln,spec1x,label='spec1x')
+
+    ax[2].plot(wvln,spec0x,label='spec0x')  
+    ax[2].plot(wvln,spec1x,label='spec1x')  
+    ax[2].plot(wvln,spec,label='final spec')  
+
+    for a in ax:
+        a.legend()
+    plt.show()
+
+    return wvln,spec
+
+#################
+
+spec_dict = loadSpectra()
+
+# Vary across temperature
+dat1 = np.genfromtxt('tlusty/hydrogengrid/t15000_g8.0.spec')
+wvln1,flux1 = dat1[:,0],dat1[:,1]
+
+dat2 = np.genfromtxt('tlusty/hydrogengrid/t15500_g8.0.spec')
+wvln2,flux2 = dat2[:,0],dat2[:,1]
+
+wvln3,flux3 = interp_spectrum_dict(15250,8,spec_dict=spec_dict)
+
 fig,ax = plt.subplots()
-
-if True:
-    tstr = '15000'
-    for g in np.arange(6,9.1,0.5):
-        gstr = np.format_float_positional(g,precision=1,min_digits=1)
-
-        scen = f"t{tstr}_g{gstr}"
-
-        dat = np.genfromtxt(f'tlusty/hydrogengrid/{scen}.spec')
-        ax.plot(dat[:,0],dat[:,1],label=gstr)
-
+ax.plot(wvln1,flux1,label="T=15,000K")
+ax.plot(wvln2,flux2,label="T=15,500K")
+ax.plot(wvln3,flux3,label="Interp")
 ax.legend()
-ax.set_yscale('log')
 plt.show()
+plt.close()
+
+
+
+# print(f"Loaded spec dict in {time.time()-start}s")
+
+
+

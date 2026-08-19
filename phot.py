@@ -28,12 +28,15 @@ from utils import newSpeciesDict
 ##################################################################################################################
 
 # Constants
-c       = 3e8
+c       = 3e8       # [m/s]
 pc2m    = 3.086e16
 pc2cm   = 3.086e18
 grav    = 6.67e-11  # [m^3 kg^-1 s^-2]
 msol    = 1.989e30  # [kg]
 R_earth = 6.371e6   # [m]
+
+# GALEX dta file path
+GALEX   = 'galex.dat'
 
 ##################################################################################################################
 
@@ -48,7 +51,7 @@ def chi2(y,ymodel,yerr):
     # print(res)
     return np.sum(res)/(len(y)-2)
 
-def ABmag2flux(mag,wvln):
+def ABmag2flux(mag,wvln=None):
     """
     Calculate an object's flux given its AB magnitude. Flux can either be in units of
     Janskys (default) or W/m^2/nm. In the case of the latter, an effective wavelength
@@ -279,11 +282,86 @@ def query_2mas(name,pos):
         print("\nFailed to query 2MASS for object "+name)
         return np.array([]),np.array([]),np.array([])
 
+def load_galex(name):   # in testing, worried about the data itself
+    """
+    Retrieve GALEX photometry for an object given its GAIA DR3 designation. Only possible for
+    likely white dwarfs (pwd > 0.75 in Gentile-Fusillo et al. 2021). Data kindly provided by 
+    Mukremin Kilic.
+
+    Parameters:
+    - name (string):    the object's GAIA DR3 designation, either with or without the leading
+                            'GAIA DR3' string.
+    """
+
+    # Get just the GAIA DR3 designation number
+    desig   = name.split()[-1]
+
+    # Load GALEX table
+    file = open(GALEX,'r')
+    galex_data = file.readlines()
+    file.close()
+
+    # If object is present, return GALEX magnitudes and uncertainties
+    for line in galex_data:
+        line = line.split()
+        if line[1] != desig: continue
+
+        # Table data. If not present (999), return empty arrays
+        fuv     = float(line[25])
+        fuv_err = float(line[26])
+        nuv     = float(line[27])
+        nuv_err = float(line[28])
+        if '999' in [fuv,fuv_err,nuv,nuv_err]:
+            break
+
+        mags    = np.array([fuv,nuv])
+        errs    = np.array([fuv_err,nuv_err])
+
+        # Extinction correction (Yuan, Liu, and Xiang 2013)
+        # rvals   = np.array([4.37,7.06])
+
+        # Extinction correction (Zhang and Yuan 2023)
+        # rvals   = np.array([6.97,7.26])
+
+        # Extinction correction (Wall et al. 2019)
+        rvals   = np.array([8.01,6.72])
+
+
+        return mags,errs,rvals
+
+    # Nothing found
+    return np.array([]),np.array([]),np.array([])
+
 ##################################################################################################################
 
 ### Retrieve all extinction-corrected photometric fluxes
 
 def photometry(name:str):
+    """
+    Given an object's Gaia DR3 designation, this function:
+        1) queries MAST for the object's RA and Dec, then uses the dustmaps package to get the
+            line-of-sight E(B-V) using maps from SFD98 and the 14% decrease correction following
+            SF11.
+        2) queries Gaia for the object's height above the galactic plane z and parallax, then
+            uses that and its position to calculate the fraction ofextinction to apply, following
+            Harris (2006). It also queries the Gaia cross-matching tables for the corresponding
+            SDSS, PanSTARRS, SkyMapper, and 2MASS designations.
+        3) retrieves photometry, if present, from the SDSS, PanSTARRS, SkyMapper, 2MASS, and GALEX*
+            catalogues, and dereddens them. Reddening values are provided in the individual query
+            functions and their sources cited therein.
+    
+    Parameters:
+    - name (string): the Gaia DR3 designation of the object, ex. "Gaia DR3 XXXXXXXXXXXXXX"
+
+    Outputs:
+    - all_wvlns (np.array(float)):      the effective wavelengths of bandpasses with successfully
+            retrieved photometry
+    - all_fluxes (np.array(float)):     the retrieved photometric fluxes in [Jy]
+    - all_fluxerrs (np.array(float)):   the uncertainties in the retrieved photometric fluxes,
+            in [Jy]. Uncertainties are derived from magnitude uncertainties, which are symmetric
+            and produce assymmetric uncertainties in flux, so the upper uncertainties in flux,
+            which are greater, are returned.
+    """
 
     ########################
     ###  Object queries  ###
@@ -291,7 +369,7 @@ def photometry(name:str):
 
     ### Get object position (RA, DEC) and get line-of-sight E(B-V)
     pos     = mast.resolve_object(name,resolver=None)
-    ebv     = sfd(pos)
+    ebv     = sfd(pos) * 0.86
     print("E(B-V):      "+str(ebv))
 
 
@@ -418,6 +496,20 @@ def photometry(name:str):
         tmas_errs = np.array([])
         tmas_exts = np.array([])
 
+    ### Load GALEX photometry table. Returns object magnitudes, errors, and R-values for both
+    ###     passbands. R-values are provided in the function call
+    print("Loading GALEX data...")
+
+    galex_mags,galex_errs,galex_rvals = load_galex(name)
+    galex_exts = galex_rvals*ebv
+    galex_mags -= galex_exts
+
+    print(galex_mags)
+    print(galex_errs)
+    print(galex_exts)
+    print("Done!")
+    print('\n' + '*'*100 + '\n')
+
     ##################################################################################################################
 
     ### Formatting of data and conversion of magnitudes to fluxes in Jy
@@ -429,6 +521,7 @@ def photometry(name:str):
     pans_eff_wvlns  = np.array([481.02,615.55,750.3,866.84,961.36]) * 1e-9
     skym_eff_wvlns  = np.array([350.02,501.6,607.69,773.28,912.03]) * 1e-9
     tmas_eff_wvlns  = np.array([1235,1662,2159]) * 1e-9
+    galex_eff_wvlns = np.array([154.89,230.34]) * 1e-9
 
     # Mags to fluxes and their errors
     all_wvlns       = np.array([])
@@ -472,18 +565,26 @@ def photometry(name:str):
         tmas_fluxes     = np.array([1594,1024,666.7]) * 10**(-0.4*tmas_mags)
         tmas_fluxes_lo  = np.array([1594,1024,666.7]) * 10**(-0.4 * (tmas_mags+tmas_errs) )
         tmas_fluxes_hi  = np.array([1594,1024,666.7]) * 10**(-0.4 * (tmas_mags-tmas_errs) )
-        # tmas_fluxes     = ABmag2flux(tmas_mags,tmas_eff_wvlns)
-        # tmas_fluxes_hi  = ABmag2flux(tmas_mags - tmas_errs,tmas_eff_wvlns)
-        # tmas_fluxes_lo  = ABmag2flux(tmas_mags + tmas_errs,tmas_eff_wvlns)
         tmas_fluxerr_hi = tmas_fluxes_hi - tmas_fluxes
         tmas_fluxerr_lo = tmas_fluxes - tmas_fluxes_lo
     else:
-        tmas_fluxes     = np.array([0,0,0,0,0])
-        tmas_fluxerr_hi = np.array([1e10,1e10,1e10,1e10,1e10])
+        tmas_fluxes     = np.array([0,0,0])
+        tmas_fluxerr_hi = np.array([1e10,1e10,1e10])
 
-    all_wvlns       = np.concat([sdss_eff_wvlns,pans_eff_wvlns,skym_eff_wvlns,tmas_eff_wvlns])
-    all_fluxes      = np.concat([sdss_fluxes,pans_fluxes,skym_fluxes,tmas_fluxes])
-    all_fluxerrs_hi = np.concat([sdss_fluxerr_hi,pans_fluxerr_hi,skym_fluxerr_hi,tmas_fluxerr_hi])
+    if np.any(galex_mags):
+        galex_fluxes    = ABmag2flux(galex_mags,galex_eff_wvlns)
+        galex_fluxes_hi = ABmag2flux(galex_mags-galex_errs,galex_eff_wvlns)
+        galex_fluxes_lo = ABmag2flux(galex_mags+galex_errs,galex_eff_wvlns)
+        galex_fluxerr_hi = galex_fluxes_hi - galex_fluxes
+        galex_fluxerr_lo = galex_fluxes - galex_fluxes_lo
+    else:
+        galex_fluxes    = np.array([0,0])
+        galex_fluxerr_hi = np.array([1e10,1e10])
+
+
+    all_wvlns       = np.concat([sdss_eff_wvlns,pans_eff_wvlns,skym_eff_wvlns,tmas_eff_wvlns,galex_eff_wvlns])
+    all_fluxes      = np.concat([sdss_fluxes,pans_fluxes,skym_fluxes,tmas_fluxes,galex_fluxes])
+    all_fluxerrs_hi = np.concat([sdss_fluxerr_hi,pans_fluxerr_hi,skym_fluxerr_hi,tmas_fluxerr_hi,galex_fluxerr_hi])
 
     return all_wvlns,all_fluxes,all_fluxerrs_hi,plx,plx_err
 
@@ -553,9 +654,9 @@ def loadSpectra():
     print(f"Loaded spectra in {round(end-start,2)}s")
     return spec_dict
 
-def interp_spectrum_dict(t,logg,spec_dict):
+def interp_spectrum_dict(t,logg,spec_dict,plotit:bool=False):
     """
-    Given a temperature (anything) and log(g) (to 2 decimal places), linearly interpolate between
+    Given a temperature (anything) and log(g), linearly interpolate between
     adjacent spectra to produce a new spectrum. Instead of reading in data from files, the data
     are accessed through a dictionary where all the data has been preloaded.
     """
@@ -564,12 +665,14 @@ def interp_spectrum_dict(t,logg,spec_dict):
     t_hi        = t_lo + 500
     t_hi_str    = str(int(t_hi))
     diff_t      = t - t_lo
+    print(t_lo_str,t_hi_str,diff_t)
 
     logg_lo     = logg - (logg % 0.5)
     logg_lo_str = np.format_float_positional(logg_lo,min_digits=1)
     logg_hi     = logg_lo + 0.5
     logg_hi_str = np.format_float_positional(logg_hi,min_digits=1)
     diff_logg   = logg - logg_lo
+    print(logg_lo_str,logg_hi_str,diff_logg)
 
     # Bilinear interpolation over model grid
     spec00  = spec_dict[f"t{t_lo_str}_g{logg_lo_str}"]
@@ -580,10 +683,31 @@ def interp_spectrum_dict(t,logg,spec_dict):
     # Interpolate fluxes to lower model wavelength spectrum
     wvln    = spec00['wvln']
 
-    spec0x  = spec00['flux'] + np.interp(wvln,spec01['wvln'],spec01['flux']) * diff_logg/0.5
-    spec1x  = np.interp(wvln,spec10['wvln'],spec01['flux'])*(1-diff_logg/0.5) + np.interp(wvln,spec11['wvln'],spec11['flux'])*diff_logg/0.5
+    spec0x  = spec00['flux']*(1-diff_logg/0.5) + np.interp(wvln,spec01['wvln'],spec01['flux']) * diff_logg/0.5
+    spec1x  = np.interp(wvln,spec10['wvln'],spec10['flux'])*(1-diff_logg/0.5) + np.interp(wvln,spec11['wvln'],spec11['flux'])*diff_logg/0.5
 
     spec    = spec0x*(1-diff_t/500) + spec1x*(diff_t/500)
+
+    if plotit:
+        fig,ax = plt.subplots(ncols=3)
+
+        ax[0].plot(spec00['wvln'],spec00['flux'],label='spec00') 
+        ax[0].plot(spec01['wvln'],spec01['flux'],label='spec01')
+        ax[0].plot(wvln,spec0x,label='spec0x')                     
+
+        ax[1].plot(spec10['wvln'],spec10['flux'],label='spec10')
+        ax[1].plot(spec11['wvln'],spec11['flux'],label='spec11')
+        ax[1].plot(wvln,spec1x,label='spec1x')
+
+        ax[2].plot(wvln,spec0x,label='spec0x')  
+        ax[2].plot(wvln,spec1x,label='spec1x')  
+        ax[2].plot(wvln,spec,label='final spec')  
+
+        for a in ax:
+            a.legend()
+        plt.show()
+        plt.close()
+
     return wvln,spec
 
 def model_flux_to_phot(mwvln,mflux):
@@ -692,14 +816,24 @@ def shrinkScenarios():
 
 ##################################################################################################################
 
-spec_dict = loadSpectra()
+name    = 'Gaia DR3 43629828277884160'
+pos     = mast.resolve_object(name,resolver=None)
+ebv     = sfd(pos)
 
-name    = 'Gaia DR3 3251748915515143296'
+mags,_,_ = load_galex(name)
+print(mags)
 
 # Get photometry and parallax
 wvln_obs,flux_obs,err_obs,plx,plx_err = photometry(name)
 P0      = plx
 sig_P0  = plx_err
+
+fig,ax = plt.subplots()
+ax.scatter(wvln_obs,flux_obs)
+plt.show()
+input()
+
+spec_dict = loadSpectra()
 
 # variables for emcee
 ndim , nwalkers , nstep , nburn = 4 , 400 , 1000 , 200
