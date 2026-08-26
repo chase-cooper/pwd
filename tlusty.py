@@ -35,7 +35,7 @@ def pureHmodel(scen:str,teff:float,log_g:float):
     subprocess.run(['ln','-s','-f',PATH+'/data','data'])
     subprocess.run(['ln','-s','-f',FLAG,'cwd.flag'])
 
-    writeUnit5(path=PATH+'scenarios/'+scen+'/lte',teff=teff,log_g=log_g)
+    writeUnit5(path=PATH+'scenarios/'+scen+'/lte',teff=teff,log_g=log_g,is_lte=False)
 
     model_broke = False
     for i in range(ntries):
@@ -62,49 +62,6 @@ def pureHmodel(scen:str,teff:float,log_g:float):
         print("LTE model completed!")
         return True
     
-
-def pureHemodel(scen:str,teff:float,log_g:float):
-    """
-    Run a simple, LTE-LTGray model for a pure-H white dwarf.
-    """
-    
-    # Make directories and link files
-    os.chdir(PATH)
-    if scen in os.listdir('scenarios'):
-        ans = input(f'Directory {PATH}/{scen}/ already exists. Would you like to replace it? [y/n]\n')
-        if ans.lower()=='n':
-            print('Exiting...')
-            sys.exit(0)
-        elif ans.lower()=='y':
-            print("Removing directory...")
-            shutil.rmtree(f'scenarios/{scen}')
-        else:
-            print('Invalid response. Exiting...')
-            sys.exit(0)
-    os.chdir('scenarios')
-    os.mkdir(scen)
-    os.chdir(scen)
-    os.mkdir('lte')
-    os.chdir('lte')
-    subprocess.run(['ln','-s','-f',PATH+'/data','data'])
-    subprocess.run(['ln','-s','-f',FLAG,'cwd.flag'])
-
-    sp  = newSpeciesDict()
-    sp['h']['mode'] = 0
-    sp['h']['abn']  = 0
-    sp['he']['mode']= 2
-
-    writeUnit5(path=PATH+'scenarios/'+scen+'/lte',teff=teff,log_g=log_g,species_dict=sp)
-    
-    TLEXE = TLUSTY+'/tlusty205.exe'
-    try:
-        os.system(f"{TLEXE} < fort.5 > lte.6")
-    except:
-        print("\n Model run has encountered an error. Exiting...")
-        sys.exit(0)
-    print("LTE model completed!")
-    os.chdir(PATH)
-
 def metals(scen:str,teff:float,log_g:float,spdict:dict,is_lte:bool=True):
     """
     Produce an LTE WD model with metal lines. Requires an LTE model as a base.
@@ -136,11 +93,9 @@ def metals(scen:str,teff:float,log_g:float,spdict:dict,is_lte:bool=True):
                species_dict=spdict,
                is_lte=is_lte,
                is_ltgray=False)         # LTGRAY=False means a base atmosphere file is needed
-    
-    if spdict['he']['mode']==2 and spdict['h']['mode']!=2:
-        tlexe = TLUSTY+'/tlusty205.exe'
-    else:
-        tlexe = TLEXE
+
+    # Executable path
+    tlexe = TLEXE
 
     # Copy output from pure-H model
     subprocess.run(['cp','../lte/fort.7','fort.8'])

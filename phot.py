@@ -23,7 +23,7 @@ import numpy as np
 from scipy.interpolate import LinearNDInterpolator
 import os,requests,shutil,subprocess,sys,time
 from consts import SCEN
-from utils import newSpeciesDict
+from utils import *
 
 ##################################################################################################################
 
@@ -37,32 +37,6 @@ R_earth = 6.371e6   # [m]
 
 # GALEX dta file path
 GALEX   = 'galex.dat'
-
-##################################################################################################################
-
-### Utility functions
-
-def chi2(y,ymodel,yerr):
-    """
-    Calculate the reduced chi-squared score of a model fit, assuming the model 
-    is parameterized by two values ( T_eff, log(g) )
-    """
-    res = (y - ymodel)**2 / yerr**2
-    # print(res)
-    return np.sum(res)/(len(y)-2)
-
-def ABmag2flux(mag,wvln=None):
-    """
-    Calculate an object's flux given its AB magnitude. Flux can either be in units of
-    Janskys (default) or W/m^2/nm. In the case of the latter, an effective wavelength
-    is needed.
-    """
-
-    c = 3e8
-    fluxJanskys = 10**(3.56 - 0.4*mag)                  # Jy = 10^-26 W/m^2/Hz
-    # flux        = 1e-26*fluxJanskys*c/(wvln*wvln)   # W/m^2/nm
-    return fluxJanskys
-ABmag2flux = np.vectorize(ABmag2flux)
 
 ##################################################################################################################
 
@@ -99,6 +73,7 @@ def query_gaia(name:str,verbose:bool=False):
                                 f"from gaiadr3.gaia_source where source_id = {name}",
                                 dump_to_file=False)
     res = job.get_results()
+    
 
     # Parallax and position
     plx         = res['parallax'][0]
@@ -120,7 +95,7 @@ def query_gaia(name:str,verbose:bool=False):
         ext_frac    = min( (dist-100) / (250/np.abs(np.sin(np.deg2rad(b))) - 100), 1)
 
     ### Query SDSS crossmatch table for SDSS neighbour
-    job_sdss    = Gaia.launch_job_async(f"SELECT TOP 10 source_id, original_ext_source_id, angular_distance FROM gaiadr3.sdssdr13_best_neighbour WHERE source_id = {name}",
+    job_sdss    = Gaia.launch_job(f"SELECT TOP 10 source_id, original_ext_source_id, angular_distance FROM gaiadr3.sdssdr13_best_neighbour WHERE source_id = {name}",
                                 dump_to_file=False)
     sdss    = job_sdss.get_results()
     try:
@@ -407,6 +382,9 @@ def photometry(name:str):
             # Correct SDSS mags for reddening
             sdss_mags   -= sdss_exts*ext_frac
 
+            # Magnitude error lower bound from Bergeron+2019
+            sdss_errs   = np.maximum(sdss_errs,0.03)
+
             print(sdss_mags)
             print(sdss_errs)
             print(sdss_exts)
@@ -438,6 +416,9 @@ def photometry(name:str):
         pans_exts   = pans_rvals * ebv
         pans_mags   -= pans_exts * ext_frac
 
+        # Magnitude error lower bound from Bergeron+2019
+        pans_errs   = np.maximum(pans_errs,0.03)
+
         print(pans_mags)
         print(pans_errs)
         print(pans_exts)
@@ -462,6 +443,9 @@ def photometry(name:str):
         skym_exts   = skym_rvals * ebv
         skym_mags   -= skym_exts * ext_frac
 
+        # Magnitude error lower bound from Bergeron+2019
+        skym_errs   = np.maximum(skym_errs,0.03)
+
         print(skym_mags)
         print(skym_errs)
         print(skym_exts)
@@ -485,6 +469,9 @@ def photometry(name:str):
         tmas_exts = tmas_rvals*ebv
         tmas_mags -= tmas_exts
 
+        # Magnitude error lower bound from Bergeron+2019
+        tmas_errs   = np.maximum(tmas_errs,0.03)
+
         print(tmas_mags)
         print(tmas_errs)
         print(tmas_exts)
@@ -504,9 +491,16 @@ def photometry(name:str):
     galex_exts = galex_rvals*ebv
     galex_mags -= galex_exts
 
+    # Magnitude error lower bound from Bergeron+2019
+    galex_errs   = np.maximum(galex_errs,0.03)
+
     print(galex_mags)
     print(galex_errs)
     print(galex_exts)
+
+    # # Data is dubious, turning off for now
+    # galex_mags = np.array([0,0])
+
     print("Done!")
     print('\n' + '*'*100 + '\n')
 
@@ -538,6 +532,7 @@ def photometry(name:str):
     else:
         sdss_fluxes     = np.array([0,0,0,0,0])
         sdss_fluxerr_hi = np.array([1e10,1e10,1e10,1e10,1e10])
+        sdss_fluxerr_lo = np.array([1e10,1e10,1e10,1e10,1e10])
 
     if np.any(pans_mags):
         pans_fluxes     = ABmag2flux(pans_mags,pans_eff_wvlns)
@@ -548,6 +543,7 @@ def photometry(name:str):
     else:
         pans_fluxes     = np.array([0,0,0,0,0])
         pans_fluxerr_hi = np.array([1e10,1e10,1e10,1e10,1e10])
+        pans_fluxerr_lo = np.array([1e10,1e10,1e10,1e10,1e10])
 
     if np.any(skym_mags):
         skym_fluxes     = ABmag2flux(skym_mags,skym_eff_wvlns)
@@ -558,6 +554,7 @@ def photometry(name:str):
     else:
         skym_fluxes     = np.array([0,0,0,0,0])
         skym_fluxerr_hi = np.array([1e10,1e10,1e10,1e10,1e10])
+        skym_fluxerr_lo = np.array([1e10,1e10,1e10,1e10,1e10])
 
     if np.any(tmas_mags):   
         # NOTE: 2MASS mags are not absolute (AB) magnitudes; fluxes are calculated using zero-
@@ -570,6 +567,7 @@ def photometry(name:str):
     else:
         tmas_fluxes     = np.array([0,0,0])
         tmas_fluxerr_hi = np.array([1e10,1e10,1e10])
+        tmas_fluxerr_lo = np.array([1e10,1e10,1e10])
 
     if np.any(galex_mags):
         galex_fluxes    = ABmag2flux(galex_mags,galex_eff_wvlns)
@@ -580,11 +578,12 @@ def photometry(name:str):
     else:
         galex_fluxes    = np.array([0,0])
         galex_fluxerr_hi = np.array([1e10,1e10])
-
+        galex_fluxerr_lo = np.array([1e10,1e10])
 
     all_wvlns       = np.concat([sdss_eff_wvlns,pans_eff_wvlns,skym_eff_wvlns,tmas_eff_wvlns,galex_eff_wvlns])
     all_fluxes      = np.concat([sdss_fluxes,pans_fluxes,skym_fluxes,tmas_fluxes,galex_fluxes])
     all_fluxerrs_hi = np.concat([sdss_fluxerr_hi,pans_fluxerr_hi,skym_fluxerr_hi,tmas_fluxerr_hi,galex_fluxerr_hi])
+    all_fluxerrs_lo = np.concat([sdss_fluxerr_lo,pans_fluxerr_lo,skym_fluxerr_lo,tmas_fluxerr_lo,galex_fluxerr_lo])
 
     return all_wvlns,all_fluxes,all_fluxerrs_hi,plx,plx_err
 
@@ -665,14 +664,14 @@ def interp_spectrum_dict(t,logg,spec_dict,plotit:bool=False):
     t_hi        = t_lo + 500
     t_hi_str    = str(int(t_hi))
     diff_t      = t - t_lo
-    print(t_lo_str,t_hi_str,diff_t)
+    # print(t_lo_str,t_hi_str,diff_t)
 
     logg_lo     = logg - (logg % 0.5)
     logg_lo_str = np.format_float_positional(logg_lo,min_digits=1)
     logg_hi     = logg_lo + 0.5
     logg_hi_str = np.format_float_positional(logg_hi,min_digits=1)
     diff_logg   = logg - logg_lo
-    print(logg_lo_str,logg_hi_str,diff_logg)
+    # print(logg_lo_str,logg_hi_str,diff_logg)
 
     # Bilinear interpolation over model grid
     spec00  = spec_dict[f"t{t_lo_str}_g{logg_lo_str}"]
@@ -718,6 +717,7 @@ def model_flux_to_phot(mwvln,mflux):
     pans_model_flux = np.array([])
     skym_model_flux = np.array([])
     tmas_model_flux = np.array([])
+    galex_model_flux= np.array([])
 
     for f in ['u','g','r','i','z']:
         pass_fname  = f"filters/sdss/{f}.dat"
@@ -739,7 +739,12 @@ def model_flux_to_phot(mwvln,mflux):
         model_flux = convolveModelWithBandpass(mwvln,mflux,pass_fname)
         tmas_model_flux = np.concat([tmas_model_flux,np.array([model_flux])])
 
-    return np.concat([sdss_model_flux,pans_model_flux,skym_model_flux,tmas_model_flux])
+    for f in ['fuv','nuv']:
+        pass_fname = f"filters/galex/{f}.dat"
+        model_flux = convolveModelWithBandpass(mwvln,mflux,pass_fname)
+        galex_model_flux = np.concat([galex_model_flux,np.array([model_flux])])
+
+    return np.concat([sdss_model_flux,pans_model_flux,skym_model_flux,tmas_model_flux,galex_model_flux])
 
 ##################################################################################################################
 
@@ -816,27 +821,33 @@ def shrinkScenarios():
 
 ##################################################################################################################
 
-name    = 'Gaia DR3 43629828277884160'
+# Saving results for G29-38 b/c Gaia query is unbelievably slow
+# wvln_obs = [13.40877,13.05396,13.12314,13.76787,13.62837]
+# flux_obs
+# err_obs 
+# plx = 57.062
+# plx_err = 0.025052
+
+name    = 'Gaia DR3 2660358032257156736'
 pos     = mast.resolve_object(name,resolver=None)
 ebv     = sfd(pos)
 
-mags,_,_ = load_galex(name)
-print(mags)
-
 # Get photometry and parallax
 wvln_obs,flux_obs,err_obs,plx,plx_err = photometry(name)
+print(wvln_obs)
+print(flux_obs)
+print(err_obs)
+print(plx)
+print(plx_err)
 P0      = plx
 sig_P0  = plx_err
 
-fig,ax = plt.subplots()
-ax.scatter(wvln_obs,flux_obs)
-plt.show()
-input()
+# input()
 
 spec_dict = loadSpectra()
 
 # variables for emcee
-ndim , nwalkers , nstep , nburn = 4 , 400 , 1000 , 200
+ndim , nwalkers , nstep , nburn = 4 , 20 , 100 , 0
 
 # initial guess of parameters
 x0  = np.array([15000,8,1,10])
@@ -860,10 +871,24 @@ samples = reader.get_chain(discard=nburn,thin=nthin,flat=True)
 lnprob  = reader.get_log_prob(discard=nburn,flat=True,thin=nthin)
 lnpmax  = np.amax(lnprob)
 xmax    = samples[np.where(lnprob==lnpmax)][0]
-print(xmax)
+# xmax    = [11960,8.23,1.3,57.02]
 
-# Plot results
+### Plot results
+# MCMC
 fig     = corner.corner(samples,quantiles=[0.16,0.5,0.84],show_titles=True,labels=["T",r"$\log(g)$","R",r"$\pi$"])#,range=[[13000,25000],[7.75,8.25],[3e6,1.5e7],[1,100]])
+
+# Best-fit photometry
+teff,logg,r,plx   = xmax
+d = (1000 / plx) * pc2m
+rm = r*R_earth
+wvln,flux       = interp_spectrum_dict(teff,logg,spec_dict)
+phot_model_emi  = model_flux_to_phot(wvln,flux)
+phot_model_obs  = phot_model_emi*rm*rm/d/d
+
+fig2,ax2    = plt.subplots()
+ax2.errorbar(wvln_obs[flux_obs!=0],flux_obs[flux_obs!=0],err_obs[flux_obs!=0],linestyle='',label='Observed')
+ax2.scatter(wvln_obs[flux_obs!=0],phot_model_obs[flux_obs!=0],c='black',label='Single best fit')
+
 plt.show()
 
 input()

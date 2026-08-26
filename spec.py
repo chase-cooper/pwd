@@ -1,477 +1,46 @@
-from astropy.io import fits
-from astropy.table import Table
-from astropy.modeling import functional_models
-from astropy.convolution import convolve
-from astroquery.mast import Observations
-from scipy.interpolate import interp1d
 from consts import *
 import matplotlib.pyplot as plt
 import numpy as np
 import os,subprocess,time
-import urllib.request
 
+### MCMC
 import corner,emcee
 from multiprocessing import Pool
 
-
-# Given a scenario whose abundances you wish to fit, and a spectrum to which the scenario is fitted
-#   to, find best-fit abundances for a list of metal species.
-
-
-################################################################################################
-
-def chi2(y,ymodel,yerr):
-    """
-    Calculate the reduced chi-squared score of a model fit, assuming the model 
-    is parameterized by two values ( T_eff, log(g) )
-    """
-    res = np.sum(np.nan_to_num((y-ymodel)**2/yerr**2,nan=0))
-    return res/(len(y)-2)
+### Other
+from utils import *
 
 ##########################################################################################
 
-### Functions to open observed and model spectra
+def bilinear_interp(teff,logg,spec_dict):
 
-def openModel(fnamem:str):
-    """
-    Read model spectrum
-    """
-    dat = np.loadtxt(fnamem)
-    return dat[:,0],dat[:,1]
+    # From values, get adjacent grid points
+    t_lo        = teff - (teff % 500)
+    t_lo_str    = str(int(t_lo))
+    t_hi        = t_lo + 500
+    t_hi_str    = str(int(t_hi))
+    diff_t      = teff - t_lo
 
-def openFile(fname:str):
-    """
-    Extract the spectrum from a single .fits file.
+    logg_lo     = logg - (logg % 0.5)
+    logg_lo_str = np.format_float_positional(logg_lo,min_digits=1)
+    logg_hi     = logg_lo + 0.5
+    logg_hi_str = np.format_float_positional(logg_hi,min_digits=1)
+    diff_logg   = logg - logg_lo
 
-    I'm not sure that all files I'll be working with share the same format, so
-    this function may be edited on the fly.
-    """
-    with fits.open(fname) as hdu:
-        data_fuva   = hdu[1].data[1]
-        data_fuvb   = hdu[1].data[0]
-        wvln0       = np.hstack((data_fuva[3],data_fuvb[3]))    # Angstroms
-        flux0       = np.hstack((data_fuva[4],data_fuvb[4]))    # erg/cm^2/s/A
-        sigma0      = np.hstack((data_fuva[5],data_fuvb[5]))    # ^^^^^^^^^^^^
+    # Retrieve spectra
+    spec00      = spec_dict[f"t{t_lo_str}_g{logg_lo_str}"]
+    spec01      = spec_dict[f"t{t_lo_str}_g{logg_hi_str}"]
+    spec10      = spec_dict[f"t{t_hi_str}_g{logg_lo_str}"]
+    spec11      = spec_dict[f"t{t_hi_str}_g{logg_hi_str}"]
+    wvln        = spec00['wvln']
 
-        # Remove zeros in spectrum
-        wvln,flux,sigma = [],[],[]
-        for i in range(len(wvln0)):
-            if flux0[i] != 0:
-                wvln.append(wvln0[i])
-                flux.append(flux0[i])
-                sigma.append(sigma0[i])
-        wvln = np.array(wvln)
-        flux = np.array(flux)
-        sigma= np.array(sigma)
-        hdu.close()
-    return wvln,flux,sigma
+    # Interpolate
+    spec0x      = spec00['flux']*(1-diff_logg/0.5) + np.interp(wvln,spec01['wvln'],spec01['flux'])*diff_logg/0.5
+    spec1x      = spec10['flux']*(1-diff_logg/0.5) + np.interp(wvln,spec11['wvln'],spec11['flux'])*diff_logg/0.5
+    spec_final  = spec0x*(1-diff_t/500) + spec1x*diff_t/500
 
-##########################################################################################
-
-### Functions to convolve model spectra with the proper LSF
-
-def lsfParams(fname:str):
-    """
-    Get relevant parameters to determine which LSF file you need for a given
-    FITS file. Borrowed from HST Notebook on LSF convolution
-    """
-    # Select the primary header
-    fuvHeader0 = fits.getheader(fname, ext=0)
-    # print(f"For the file {fname}, the relevant parameters are: ")
-
-    # Make a dictionary to store what you find here
-    param_dict = {}
-
-    # We want data for the FUV detector, G130M grating at LP3 cenwave 1291
-    keywords = ["DETECTOR", "OPT_ELEM", "LIFE_ADJ", "CENWAVE", "DISPTAB"]
-
-    # Print out the relevant values:
-    for hdrKeyword in keywords:
-        # For DISPTAB
-        try:
-            # Save the key/value pairs to the dictionary
-            value = fuvHeader0[hdrKeyword].split("$")[1]
-            # DISPTAB needs the split here
-            param_dict[hdrKeyword] = value
-        # For other params
-        except (IndexError, AttributeError):
-            # Save the key/value pairs to the dictionary
-            value = fuvHeader0[hdrKeyword]
-            param_dict[hdrKeyword] = value
-
-        # Print the key/value pairs
-        # print(f"{hdrKeyword} = {value}")
-
-    return param_dict
-
-def fetch_files(det, grating, lpPos, cenwave, disptab):
-    """
-    Given all the inputs, this will download both
-    the LSF and Disptab files to use in the convolution and return their paths.
-
-    Input: 
-    det (str): The detector used
-    grating (str): Type of grating used
-    lpPos (str): Lifetime position used
-    cenwave (str): Central wavelength used
-    disptab (str): DISPTAB used (will get the path in the function)
-
-    Returns:
-    LSF_file_name (str): filename of the new downloaded LSF file
-    disptab_path (str): path to the new downloaded disptab file
-
-    Borrowed from HST Notebook on LSF convolution
-    """
-    datadir = 'hstdata'
-
-    # Link to where all the files live
-    COS_site_rootname = (
-        "https://www.stsci.edu/files/live/sites/www/files/"
-        "home/hst/instrumentation/cos/"
-        "performance/spectral-resolution/_documents/"
-    )  
-    # print(det)
-
-    # Only one file for NUV
-    if det == "NUV":
-        LSF_file_name = "nuv_model_lsf.dat"
-
-    # FUV files follow a naming pattern
-    elif det == "FUV":
-        LSF_file_name = f"aa_LSFTable_{grating}_{cenwave}_LP{lpPos}_cn.dat"
-
-    # Where to find file online
-    LSF_file_webpath = COS_site_rootname + LSF_file_name
-    urllib.request.urlretrieve(
-        LSF_file_webpath, f"{datadir}/{LSF_file_name}"
-    )
+    return wvln,spec_final
     
-    # Where to save file to locally
-    # print(f"Downloaded LSF file to {f"{datadir}/{LSF_file_name}"}")
-
-    # And we'll need to get the DISPTAB file as well
-    disptab_path = f"{datadir}/{disptab}"
-    urllib.request.urlretrieve(
-        f"https://hst-crds.stsci.edu/unchecked_get/references/hst/{disptab}",
-        disptab_path
-    )
-    
-    # print(f"Downloaded DISPTAB file to {disptab_path}")
-
-    return LSF_file_name, disptab_path
-
-def read_lsf(filename):
-    # This is the table of all the LSFs: called "lsf"
-    # The first column is a list of the wavelengths corresponding to the line profile, so we set our header accordingly
-    # If its an NUV file, header starts 1 line later
-    # Borrowed from HST Notebook on LSF convolution
-    if "nuv_" in filename:
-        ftype = "nuv"
-        # print(f"Detector used: {ftype}")
-        hs = 1
-
-    # Otherwise, assume its an FUV file
-    else:
-        ftype = "fuv"
-        # print(f"Detector used: {ftype}")
-
-    hs = 0
-    lsf = Table.read(filename,
-                     format="ascii",
-                     header_start=hs)
-
-    # This is the range of each LSF in pixels (for FUV from -160 to +160, inclusive)
-    # The middle pixel of the lsf is considered zero; the center is relative zero
-
-    # Integer division to yield whole pixels
-    pix = np.arange(len(lsf)) - len(lsf) // 2
-
-    # The column names returned as integers.
-    lsf_wvlns = np.array([int(float(k)) for k in lsf.keys()])
-
-    return lsf, pix, lsf_wvlns
-
-def get_disp_params(disptab, cenwave, segment, x=[]):
-    """
-    Helper function to redefine_lsf(). Reads through a DISPTAB file and gives relevant
-    dispersion relationship/wavelength solution over input pixels.
-
-    Parameters:
-    disptab (str): Path to your DISPTAB file.
-    cenwave (str): Cenwave for calculation of dispersion relationship.
-    segment (str): FUVA or FUVB?
-    x (list): Range in pixels over which to calculate wvln with dispersion relationship (optional).
-    
-    Returns:
-    disp_coeff (list): Coefficients of the relevant polynomial dispersion relationship
-    wavelength (list; if applicable): Wavelengths corresponding to input x pixels 
-
-    Borrowed from HST Notebook on LSF convolution
-    """
-    with fits.open(disptab) as d:
-        wh_disp = np.where(
-            (d[1].data["cenwave"] == cenwave)
-            & (d[1].data["segment"] == segment)
-            & (d[1].data["aperture"] == "PSA")
-        )[0]
-        # 0 is needed as this returns nested list [[arr]]
-        disp_coeff = d[1].data[wh_disp]["COEFF"][0]
-    
-    # If given a pixel range, build up a polynomial wvln solution pix -> λ
-    if len(x):
-        wavelength = np.polyval(p=disp_coeff[::-1], x=np.arange(16384))
-        return disp_coeff, wavelength
-    
-    # If x is empty:
-    else:
-        return disp_coeff
-
-def redefine_lsf(lsf_file, cenwave, disptab, detector="FUV"):
-    """
-    Helper function to convolve_lsf(). Converts the LSF kernels in the LSF file from a fn(pixel) -> fn(λ)
-    which can then be used by convolve_lsf() and re-bins the kernels.
-
-    Parameters:
-    lsf_file (str): path to your LSF file
-    cenwave (str): Cenwave for calculation of dispersion relationship
-    disptab (str): path to your DISPTAB file
-    detector (str): FUV or NUV?
-
-    Returns:
-    new_lsf (numpy.ndarray): Remapped LSF kernels.
-    new_w (numpy.ndarray): New LSF kernel's LSF wavelengths.
-    step (float): first order coefficient of the FUVA dispersion relationship; proxy for Δλ/Δpixel.
-
-    Borrowed from HST Notebook on LSF convolution
-    """
-
-    if detector == "FUV":
-        xfull = np.arange(16384)
-
-        # Read in the dispersion relationship here for the segments
-        # FUVA is simple
-        disp_coeff_a, wavelength_a = get_disp_params(disptab,
-                                                     cenwave,
-                                                     "FUVA",
-                                                     x=xfull)
-        
-        # FUVB isn't taken for cenwave 1105, nor 800:
-        if (cenwave != 1105) & (cenwave != 800):
-            disp_coeff_b, wavelength_b = get_disp_params(disptab,
-                                                         cenwave,
-                                                         "FUVB",
-                                                         x=xfull)
-        elif cenwave == 1105:
-            # 1105 doesn't have an FUVB so set it to something arbitrary and clearly not real:
-            wavelength_b = [-99.0, 0.0]
-
-        # Get the step size info from the FUVA 1st order dispersion coefficient
-        step = disp_coeff_a[1]
-
-        # Read in the lsf file
-        lsf, pix, w = read_lsf(lsf_file)
-
-        # Take median spacing between original LSF kernels
-        deltaw = np.median(np.diff(w))
-
-        # Resamples if the spacing of the original LSF wvlns is too narrow
-        if (deltaw < len(pix) * step * 2):  
-            # This is all a set up of the bins we want to use
-            # The wvln difference between kernels of the new LSF should be about twice their width
-            new_deltaw = round(len(pix) * step * 2.0)  
-
-            # nw = Number of LSF wavelengths
-            new_nw = (int(round((max(w) - min(w)) / new_deltaw)) + 1)  
-
-            # New version of lsf_wvlns
-            new_w = min(w) + np.arange(new_nw) * new_deltaw  
-
-            # Populating the lsf with the proper bins:
-            # Empty 2-D array to populate
-            new_lsf = np.zeros((len(pix), new_nw)) 
-
-            for i, current_w in enumerate(new_w):
-                # Find closest original LSF wavelength to new LSF wavelength
-                dist = abs(current_w - w)  
-                lsf_index = np.argmin(dist)
-                # Column name corresponding to closest orig LSF wvln
-                orig_lsf_wvln_key = lsf.keys()[lsf_index]  
-                # Assign new LSF wvln the kernel of the closest original lsf wvln
-                new_lsf[:, i] = np.array(lsf[orig_lsf_wvln_key])  
-
-        else:
-            new_lsf = lsf
-            new_w = w
-
-        return new_lsf, new_w, step
-
-    elif detector == "NUV":
-        xfull = np.arange(1024)
-
-        # Read in the dispersion relationship here for the segments
-        disp_coeff_a, wavelength_a = get_disp_params(disptab,
-                                                     cenwave,
-                                                     "NUVA",
-                                                     x=xfull)
-        
-        disp_coeff_b, wavelength_b = get_disp_params(disptab,
-                                                     cenwave,
-                                                     "NUVB",
-                                                     x=xfull)
-        
-        disp_coeff_c, wavelength_c = get_disp_params(disptab,
-                                                     cenwave,
-                                                     "NUVC",
-                                                     x=xfull)
-
-        # Get the step size info from the NUVB 1st order dispersion coefficient
-        step = disp_coeff_b[1]
-
-        # Read in the lsf file
-        lsf, pix, w = read_lsf(lsf_file)
-
-        # Take median spacing between original LSF kernels
-        deltaw = np.median(np.diff(w))
-
-        # This section is a set up of the new bins we want to use:
-        # The wvln difference between kernels of the new LSF should be about twice their width
-        new_deltaw = round(len(pix) * step * 2.0) 
-
-        # nw = Number of LSF wavelengths
-        new_nw = (int(round((max(w) - min(w)) / new_deltaw)) + 1)  
-
-        # New version of lsf_wvlns
-        new_w = min(w) + np.arange(new_nw) * new_deltaw  
-
-        # Populating the lsf with the proper bins:
-        # Empty 2-D array to populate
-        new_lsf = np.zeros((len(pix), new_nw))  
-
-        for i, current_w in enumerate(new_w):
-            # Find closest original LSF wavelength to new LSF wavelength
-            dist = abs(current_w - w)  
-            lsf_index = np.argmin(dist)
-
-            # Column name corresponding to closest orig LSF wvln
-            orig_lsf_wvln_key = lsf.keys()[lsf_index]  
-            
-            # Assign new LSF wvln the kernel of the closest original lsf wvln
-            new_lsf[:, i] = np.array(lsf[orig_lsf_wvln_key])  
-            
-        return new_lsf, new_w, step
-
-def convolve_lsf(wavelength, spec, cenwave, lsf_file, disptab, detector="FUV"):
-    """
-    Main function; Convolves an input spectrum - i.e. template or STIS spectrum - with the COS LSF.
-
-    Parameters:
-    wavelength (list or array): Wavelengths of the spectrum to convolve.
-    spec (list or array): Fluxes or intensities of the spectrum to convolve.
-    cenwave (str): Cenwave for calculation of dispersion relationship
-    lsf_file (str): Path to your LSF file
-    disptab (str): Path to your DISPTAB file
-    detector (str) : Assumes an FUV detector, but you may specify 'NUV'.
-
-    Returns:
-    wave_cos (numpy.ndarray): Wavelengths of convolved spectrum.!Different length from input wvln
-    final_spec (numpy.ndarray): New LSF kernel's LSF wavelengths.!Different length from input spec
-
-    Borrowed from HST Notebook on LSF convolution.
-    """
-    # First calls redefine to get right format of LSF kernels
-    new_lsf, new_w, step = redefine_lsf(lsf_file,
-                                        cenwave,
-                                        disptab,
-                                        detector=detector)
-
-    # Sets up new wavelength scale used in the convolution
-    nstep = round((max(wavelength) - min(wavelength)) / step) - 1
-    wave_cos = min(wavelength) + np.arange(nstep) * step
-
-    # Resampling onto the input spectrum's wavelength scale:
-    # Builds up interpolated function from input spectrum
-    interp_func = interp1d(wavelength, spec)  
-
-    # Builds interpolated initial spectrum at COS' wavelength scale for convolution
-    spec_cos = interp_func(wave_cos)  
-
-    # Initializes final spectrum to the interpolated input spectrum
-    final_spec = interp_func(wave_cos)  
-
-    # Loop through the redefined LSF kernels:
-    for i, w in enumerate(new_w):  
-        # First need to find the boundaries of each kernel's "jurisdiction": where it applies
-        # The first and last elements need to be treated separately
-
-        # First kernel:
-        if i == 0:  
-            diff_wave_left = 500
-            diff_wave_right = (new_w[i + 1] - w) / 2.0
-
-        # Last kernel
-        elif i == len(new_w) - 1:  
-            diff_wave_right = 500
-            diff_wave_left = (w - new_w[i - 1]) / 2.0
-
-        # All other kernels
-        else:  
-            diff_wave_left = (w - new_w[i - 1]) / 2.0
-            diff_wave_right = (new_w[i + 1] - w) / 2.0
-
-        # Splitting up the spectrum into slices around the redefined LSF kernel wvlns
-        # Will apply the kernel corresponding to that chunk to that region of the spectrum - its "jurisdiction"
-        chunk = np.where(
-            (wave_cos < w + diff_wave_right) & (wave_cos >= w - diff_wave_left)
-        )[0]
-        if len(chunk) == 0:
-            # Off the edge, go to the next chunk
-            continue
-
-        # Selects the current kernel
-        current_lsf = new_lsf[:, i]  
-
-        if len(chunk) >= len(
-            current_lsf
-        ):  # Makes sure that the kernel is smaller than the chunk
-            final_spec[chunk] = convolve(
-                spec_cos[chunk],
-                # Applies the actual convolution
-                current_lsf,  
-                boundary="extend",
-                normalize_kernel=True,
-            )
-
-    # Remember, not the same length as input spectrum data!
-    return wave_cos, final_spec  
-
-def convolveModelFromFile(fnamem,fname):
-    """
-    A function that simply puts all the previous steps together. Returns the
-    convolved model spectrum
-    """
-    params  = lsfParams(fname)
-    lsf_file,disp_file  = fetch_files(*params.values())
-    lsf_file = 'hstdata/'+lsf_file
-
-    wvln_m,spec_m = openModel(fnamem)
-    wvln_m,spec_m = convolve_lsf(wvln_m,spec_m,cenwave=params['CENWAVE'],lsf_file=lsf_file,disptab=disp_file,detector=params['DETECTOR'])
-    return wvln_m,spec_m
-
-def convolveModel(wvln,flux,fname):
-    """
-    A function that simply puts all the previous steps together. Returns the
-    convolved model spectrum
-    """
-    params  = lsfParams(fname)
-    lsf_file,disp_file  = fetch_files(*params.values())
-    lsf_file = 'hstdata/'+lsf_file
-
-    wvln_m,spec_m = wvln,flux
-    wvln_m,spec_m = convolve_lsf(wvln_m,spec_m,cenwave=params['CENWAVE'],lsf_file=lsf_file,disptab=disp_file,detector=params['DETECTOR'])
-    return wvln_m,spec_m
-
-##########################################################################################
-
 def trilinear_interp(teff,logg,abn,spec_dict):
     """
     Given values for T_eff, log(g), and chondritic silicon abundance, interpolate over the
@@ -518,7 +87,7 @@ def trilinear_interp(teff,logg,abn,spec_dict):
     spec00x     = spec000['flux'] + np.interp(wvln,spec001['wvln'],spec001['flux']) * diff_abn/0.5
     spec01x     = np.interp(wvln,spec010['wvln'],spec010['flux'])*(1-diff_abn/0.5) + np.interp(wvln,spec011['wvln'],spec011['flux'])*diff_abn/0.5
     spec10x     = np.interp(wvln,spec100['wvln'],spec100['flux'])*(1-diff_abn/0.5) + np.interp(wvln,spec101['wvln'],spec101['flux'])*diff_abn/0.5
-    spec11x     = np.interp(wvln,spec110['wvln'],spec110['flux'])*(1-diff_abn/0.5) + np.interp(wvln,spec111['wvln'],spec11['flux'])*diff_abn/0.5
+    spec11x     = np.interp(wvln,spec110['wvln'],spec110['flux'])*(1-diff_abn/0.5) + np.interp(wvln,spec111['wvln'],spec110['flux'])*diff_abn/0.5
 
     # Interpolate over log(g)
     spec0xx     = spec00x*(1-diff_logg/0.5) + spec01x*diff_logg/0.5
@@ -571,6 +140,32 @@ def scaleUpModelSpectrum(wvln_model,flux_model,wvln_obs,flux_obs,sigma_obs):
             min_s = s
 
     return wvln_model,flux_model*min_s
+
+def loadSpectra():
+    # Spectrum dictionary
+    start = time.time()
+    print("Loading spectra...",end='')
+
+    spec_dict = {}
+    for t in np.arange(10000,25001,500):
+        tstr = str(t)
+        for g in np.arange(6,9.1,0.5):
+            gstr = np.format_float_positional(g,precision=1,min_digits=1)
+
+            scen = f"t{tstr}_g{gstr}"
+            spec_dict[scen] = {}
+
+            dat = np.genfromtxt(f'tlusty/hydrogengrid/{scen}.spec')
+            fwvln = dat[:,0]
+            fflux = dat[:,1]
+            spec_dict[scen] = {
+                'wvln':fwvln,
+                'flux':fflux
+            }
+
+    end = time.time()
+    print(f"Loaded spectra in {round(end-start,2)}s")
+    return spec_dict
 
 ################################################################################################
 
@@ -662,7 +257,7 @@ def alter_synspec_abn(scen:str,anum:int,minabn,maxabn,ddex):
 def fit_line(spec:str,scen:str,anum:int,minabn,maxabn,ddex,linecen,width,plotit:bool=False):
 
     # Open and trim observed flux
-    wvln_all,flux_all,sigma_all = openFile(spec)
+    wvln_all,flux_all,sigma_all = openCOSfile(spec)
     # wvln    = wvln_all[(wvln_all > linecen-width) and (wvln_all < linecen+width)]
     wvln    = wvln_all[np.abs(wvln_all-linecen)<=width]
     flux    = flux_all[np.abs(wvln_all-linecen)<=width]
@@ -681,7 +276,7 @@ def fit_line(spec:str,scen:str,anum:int,minabn,maxabn,ddex,linecen,width,plotit:
         # Open model spectrum
         fnamem  = SCEN+f"/{scen}/synspec/{str(anum)}_{abnstr}.7"
         wvln_m_all,flux_m_all   = openModel(fnamem)
-        wvln_m_all,flux_m_all   = convolveModel(wvln_m_all,flux_m_all,spec)
+        wvln_m_all,flux_m_all   = convolveModelWithCOS(wvln_m_all,flux_m_all,spec)
 
         for j in range(len(vrad_range)):
             vrad = vrad_range[j]
@@ -733,7 +328,7 @@ def fit_line(spec:str,scen:str,anum:int,minabn,maxabn,ddex,linecen,width,plotit:
     # # Retrieve best fit spectrum
     # fname = SCEN+f"/{scen}/synspec/{str(anum)}_{min_abn}.7"
     # wvln_m,flux_m = openModel(fname)
-    # wvln_m,flux_m = convolveModel(wvln_m,flux_m,spec)
+    # wvln_m,flux_m = convolveModelWithCOS(wvln_m,flux_m,spec)
 
     # # Doppler shift spectrum
     # beta            = min_vrad/3e5
@@ -753,221 +348,168 @@ def fit_line(spec:str,scen:str,anum:int,minabn,maxabn,ddex,linecen,width,plotit:
 
 ################################################################################################
 
+# Forward model
+def log_likelihood(theta,wvln,flux,sigma,width,spec_dict,fit_halpha:bool=True,plotit:bool=False):
+
+    # unpack model parameters
+    teff,logg = theta
+
+    # use bilinear interpolation to get synthetic spectrum
+    wvln_model,flux_model = bilinear_interp(teff,logg,spec_dict)
+
+    # model spectrum uses vacuum wavelengths -- switch to air (Morton 1991) (not sure how much this matters)
+    wvln_model = wvln_model / (1 + 2.735e-4 + 131.4182/(wvln_model**2) + 2.7625e8/(wvln_model**4) ) 
+
+    # convolve model spectrum with a gaussian
+    wvln_model,flux_model = convolveModelWithGaussian(wvln_model,flux_model,wvln,width)
+
+    ### fitting to H-alpha/H-beta minimum
+    if fit_halpha:  minimum = 6562.8
+    else:           minimum = 4861.4
+
+    # Find wavelength of H-alpha minima and its shift in the observed spectrum
+    flux_obs_hmin   = flux[np.abs(wvln-minimum) <= 50]
+    flux_hmin_val   = min(flux_obs_hmin)
+    hmin_obs_ind    = np.argwhere(flux==flux_hmin_val)[0]
+    hmin_obs_wvln   = wvln[hmin_obs_ind][0]
+
+    # Apply corresponding Doppler shift to the model spectrum
+    wvln_ratio_squared = (hmin_obs_wvln/minimum)**2
+    beta            = -( (1-wvln_ratio_squared) / (1+wvln_ratio_squared) )
+    wvln_shift = wvln*np.sqrt((1+beta)/(1-beta))
+    flux_shift = flux_model
+    flux_model = np.interp(wvln,wvln_shift,flux_shift)
+
+    ### Fit first 5 Balmer lines
+    line_centers    = [6562.8,4861.4,4340.5,4101.7,3970.1,3889.1][(not fit_halpha):]
+    widths          = [150,120,80,50,30,20][(not fit_halpha):]
+    labels          = [r"H$\alpha$",r"H$\beta$",r"H$\gamma$",r"H$\delta$",r"H$\epsilon$",r"H$\zeta$"][(not fit_halpha):]
+    sum_chi2        = 0
+    if plotit: fig,ax = plt.subplots()
+
+    # For each of the first 4/5 Balmer lines:
+    for i in range(len(line_centers)):
+        # print(i)
+
+        # normalize observed and modelled spectrua to average spectra at a fixed distance from the line center
+        blue_ave        = np.average(flux[np.abs(wvln-(line_centers[i]-widths[i])) <= 2])
+        red_ave         = np.average(flux[np.abs(wvln-(line_centers[i]+widths[i])) <= 2]) #
+        cut_wvln        = wvln[np.abs(wvln-line_centers[i]) <= widths[i]]
+        cut_flux_obs    = flux[np.abs(wvln-line_centers[i]) <= widths[i]]
+        
+        norm_obs        = np.interp(cut_wvln,
+                                    [cut_wvln[0],cut_wvln[-1]],
+                                    [blue_ave,red_ave])
+                                    # [cut_flux_obs[0],cut_flux_obs[-1]])
+
+        cut_flux_model  = flux_model[np.abs(wvln-line_centers[i]) <= widths[i]]
+        norm_model      = np.interp(cut_wvln,
+                                    [cut_wvln[0],cut_wvln[-1]],
+                                    [cut_flux_model[0],cut_flux_model[-1]])
+
+        # calculate chi^2 of the fit and add it to the total chi2
+        # to get new sigmas for normalized flux, divide by original flux to get percentage differences
+        cut_sigma       = sigma[np.abs(wvln-line_centers[i]) <= widths[i]]/cut_flux_obs
+
+        score = chi2(cut_flux_obs/norm_obs,cut_flux_model/norm_model,cut_sigma)
+        sum_chi2 += score
+
+        if plotit:
+            ax.plot(cut_wvln-line_centers[i],cut_flux_obs/norm_obs + 0.3*i,c='black')
+            ax.plot(cut_wvln-line_centers[i],cut_flux_model/norm_model + 0.3*i,c='red',zorder=100)
+            ax.text(-widths[i]-20,1+0.3*i,labels[i])
+
+    if plotit:
+        ax.set_xlabel(r"$\Delta\lambda\,\, [\AA]$",size='large')
+        ax.set_ylabel("Normalized flux",size='large')
+        ax.set_xlim(-175,175)
+        plt.show()
+        plt.close()
+
+    ### Return log-likelihood using the sum of chi^2 values from each balmer line
+    return -0.5*sum_chi2
+
 def log_prior(theta):
-    """
-    Calculate prior likelihood. Assuming flat priors for everything.
-    """
-    teff,logg,abn,vrad = theta
 
-    # Constraints on parameters
+    teff,logg = theta
     if (teff < 10000) or (teff > 25000)\
-    or (logg < 6) or (logg > 9)\
-    or (abn < -9) or (abn > -4)\
-    or (vrad < -100) or (vrad > 100):
+    or (logg < 6) or (logg > 9):
         return -np.inf
-
     else:
         return 0
 
-def log_likelihood(theta,spec_dict,specfile,conv_args):
-    """
-    Calculate the log-likelihood of a forward model with parameters theta explaining the observed
-    data in file specfile.
-    """
+def log_prob(theta,wvln,flux,sigma,width,spec_dict):
 
-    # Observed data
-    x,y,y_err = openFile(specfile)
-
-    # Parameters
-    teff,logg,abn,vrad = theta
-
-    # Produce forward model
-    wvln_model,flux_model = trilinear_interp(teff,logg,abn,spec_dict)
-
-    # Apply Doppler shift
-    beta = vrad/3e5
-    wvln_model *= np.sqrt( (1+beta) / (1-beta) )
-
-    # Convolve model
-    wvln_model,flux_model = convolve_lsf(wvln_model,flux_model,*conv_args)
-
-    # Scale forward model to observed data
-    wvln_model,flux_model = scaleUpModelSpectrum(wvln_model,flux_model,x,y,y_err)
-    flux_model = np.interp(x,wvln_model,flux_model)
-
-    score = chi2(y,flux_model,y_err)
-    return -0.5*score
-
-def log_prob(theta,spec_dict,specfile,conv_args):
     lp = log_prior(theta)
     if not np.isfinite(lp):
         return -np.inf
     else:
-        return lp + log_likelihood(theta,spec_dict,specfile,conv_args)
-
-def specfit_MCMC():
-    pass
+        return lp + log_likelihood(theta,wvln,flux,sigma,width,spec_dict)
 
 ################################################################################################
 
-file_obs = 'fits files/gd56fuv.fits'
-x,y,yerr = openFile(file_obs)
+### Open observed spectrum
 
-fig,ax = plt.subplots()
-ax.errorbar(x,y,yerr)
-plt.show()
+# X-Shooter
+file_uvb = 'fits files/gd56_xsh_uvb.fits'
+wvln,flux,sigma,res_uvb = openXshooter(file_uvb)
+file_vis = 'fits files/gd56_xsh_vis.fits'
+wvln2,flux2,sigma2,res_vis = openXshooter(file_vis)
 
-# Carbon
+wvln    = np.concat([wvln,wvln2])
+flux    = np.concat([flux,flux2])
+sigma   = np.concat([sigma,sigma2])
 
-# alter_synspec_abn('t15000_g8.0_si-6.5',
-#                   6,
-#                   -9,
-#                   -4,
-#                   0.2)
+# Convolve model spectrum with a Gaussian with width given by the lowest resolution
+min_res = min(res_uvb,res_vis)
+width = 5000/min_res
 
-fig,ax = plt.subplots()
+# Load spectra dictionary
+spec_dict = loadSpectra()
 
-# abn_range,si_prob = fit_line(file_obs,
-#          't15000_g8.0_si-6.5',
-#          14,
-#          -9,
-#          -4,
-#          0.2,
-#          1299,
-#          2, plotit=False)
-# ax[0].plot(abn_range,si_prob,c=(1,0,0,0.3),label='1297-1301AA')
+### TESTING
 
-# abn_range,si_prob = fit_line(file_obs,
-#          't15000_g8.0_si-6.5',
-#          14,
-#          -9,
-#          -4,
-#          0.2,
-#          1263,
-#          3, plotit=False)
-# ax.plot(abn_range,si_prob/np.max(si_prob),c=(0,1,0,0.3),label='1260-1266AA')
-
-# _,prob = fit_line(file_obs,
-#          't15000_g8.0_si-6.5',
-#          14,
-#          -9,
-#          -4,
-#          0.2,
-#          1309,
-#          2, plotit=False)
-# si_prob += prob
-# ax.plot(abn_range,prob/np.max(prob),c=(0,0,1,0.3),label='1307-1311AA')
-
-# _,prob = fit_line(file_obs,
-#          't15000_g8.0_si-6.5',
-#          14,
-#          -9,
-#          -4,
-#          0.2,
-#          1194,
-#          4, plotit=False)
-# si_prob += prob
-# ax.plot(abn_range,prob,c=(1,0,0,0.3),label='1190-1198AA')
-
-abn_range,si_prob = fit_line(file_obs,
-         't15000_g8.0_si-6.5',
-         6,
-         -9,
-         -4,
-         0.2,
-         1335,
-         2, plotit=False)
-
-pdf = si_prob/np.sum(si_prob)
-cdf = np.zeros_like(pdf)
-for i in range(len(pdf)):
-    cdf[i] = np.sum(pdf[:i+1])
-best   = abn_range[np.argmax(pdf)]
-sig_lo = abn_range[np.argmin(np.abs(cdf-0.16))]
-sig_hi = abn_range[np.argmin(np.abs(cdf-0.84))]
-
-ax.plot(abn_range,pdf/np.max(pdf),c='black')
-ax.set_xlabel("[C/H]")
-ax.set_ylabel("Relative probability")
-ax.legend()
-ax.vlines(x=[best,sig_lo,sig_hi],ymin=0,ymax=1,linestyles='dashed',colors='grey')
-plt.show()
-# Silicon
-
-   
-
-# best fit abn = -5.2, best fit vrad = 11 km/s
-
-# fit_line(file_obs,
-#          't15000_g8.0_si-6.5',
-#          14,
-#          -9,
-#          -4,
-#          0.2,
-#          1262.4,
-#          5)
-
-# best fit abn = -5.0, best fit vrad = 9 km/s
-
-
+res = log_likelihood([10100,8.8],wvln,flux,sigma,width,spec_dict,fit_halpha=False,plotit=True)
+print(res)
 input()
-input()
+# input()
 
-############################
-### MCMC Quarantine zone ###
-############################
+### MCMC
 
-# # Load spec dict
-# start = time.time()
-# spec_dict = {}
+# variables for emcee
+ndim , nwalkers , nstep , nburn = 2 , 200 , 500 , 200
 
-# for t in np.arange(10000,25001,500):
-#     tstr = str(int(t))
-#     for g in np.arange(6,9.1,0.5):
-#         gstr = np.format_float_positional(g,min_digits=1)
-#         for abn in np.arange(-9,-3.9,0.5):
-#             abnstr = np.format_float_positional(abn,min_digits=1)
-#             scen = f"t{tstr}_g{gstr}_si{abnstr}"
-#             dat = np.genfromtxt('tlusty/scenarios/'+scen+'/synspec/fort.7')
-#             spec_dict[scen] = {
-#                 'wvln': dat[:,0],
-#                 'flux': dat[:,1]
-#             }
-# print(f"Loaded spec dict in {time.time()-start}s")
+# initial guess of parameters
+x0  = np.array([15000,8])
+pos = [x0*(1 + 1e-4*np.random.randn((2))) for w in range(nwalkers)]
 
-# # Load necessary arguments for model convolution
-# params      = lsfParams(file_obs)
-# lsf_file,disp_file  = fetch_files(*params.values())
-# lsf_file    = 'hstdata/'+lsf_file
-# conv_args   = params['CENWAVE'],lsf_file,disp_file,params['DETECTOR']
+# backup file
+fn = 'simple emcee.h5'
+backend = emcee.backends.HDFBackend( fn )
+backend.reset( nwalkers , ndim )
 
-# # variables for emcee
-# ndim , nwalkers , nstep , nburn = 4 , 10 , 200 , 50
+# The big show
+sampler = emcee.EnsembleSampler(nwalkers,ndim,log_prob,args=(wvln,flux,sigma,width,spec_dict),backend=backend)
+sampler.run_mcmc(pos,nstep,progress=True,skip_initial_state_check=True)
 
-# # initial guess of parameters
-# x0  = np.array([15000,8,-9,10])
-# pos = [x0*(1 + 1e-2*np.random.randn((4))) for w in range(nwalkers)]
+# Get results
+reader  = emcee.backends.HDFBackend(fn)
+nthin   = 2
+samples = reader.get_chain(discard=nburn,thin=nthin,flat=True)
 
-# # backup file
-# fn = 'simple emcee.h5'
-# backend = emcee.backends.HDFBackend( fn )
-# backend.reset( nwalkers , ndim )
+# Get best fitting model
+lnprob  = reader.get_log_prob(discard=nburn,flat=True,thin=nthin)
+lnpmax  = np.amax(lnprob)
+xmax    = samples[np.where(lnprob==lnpmax)][0]
+print(xmax)
+# xmax    = [11960,8.23,1.3,57.02]
 
-# # The big show
-# sampler = emcee.EnsembleSampler(nwalkers,ndim,log_prob,args=(spec_dict,file_obs,conv_args),backend=backend)
-# sampler.run_mcmc(pos,nstep,progress=True,skip_initial_state_check=True)
+### Plot results
+# MCMC
+fig     = corner.corner(samples,quantiles=[0.16,0.5,0.84],show_titles=True,labels=["T",r"$\log(g)$"])#,range=[[13000,25000],[7.75,8.25],[3e6,1.5e7],[1,100]])
+plt.show()
+plt.close()
 
-# # Get results
-# reader  = emcee.backends.HDFBackend(fn)
-# nthin   = 2
-# samples = reader.get_chain(discard=nburn,thin=nthin,flat=True)
+log_likelihood(xmax,wvln,flux,sigma,width,spec_dict,plotit=True)
 
-# # Get best fitting model
-# lnprob  = reader.get_log_prob(discard=nburn,flat=True,thin=nthin)
-# lnpmax  = np.amax(lnprob)
-# xmax    = samples[np.where(lnprob==lnpmax)][0]
-# print(xmax)
 
-# # Plot results
-# fig     = corner.corner(samples,quantiles=[0.16,0.5,0.84],show_titles=True,labels=["T",r"$\log(g)$","[Si/H]",r"$v_{\rm rad}$"],range=[[10000,25000],[6,9],[-9,-4],[-100,100]])
-# plt.show()
