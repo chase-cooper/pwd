@@ -1,8 +1,0 @@
-MOD=$1
-(~/tlusty3.01/tlusty3.01.exe <$MOD.5 > $MOD.6) >& /dev/null
-cp fort.7 $MOD.7
-cp fort.9 $MOD.9
-cp fort.69 $MOD.69
-cp fort.11 $MOD.11
-cp fort.14 $MOD.14
-echo "model $MOD finished"

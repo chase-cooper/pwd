@@ -5,6 +5,7 @@ import numpy as np
 import os,subprocess,time
 from scipy.interpolate import LinearNDInterpolator
 from consts import *
+from utils import *
 
 
 def doubleModelComp():
@@ -258,10 +259,15 @@ def interp_spectrum_dict(t,logg,spec_dict):
 
 #################
 
-wvln,flux,sigma = openCOSfile('fits files/wd1226+110_cos_fuv.fits')
-
 fig,ax = plt.subplots()
+
+# wvln,flux = openModel('laura_spectra/GaiaJ0006+2858p')
+# ax.plot(wvln,flux)
+
+wvln,flux = openModel('tlusty/scenarios/test/lte/fort.14')
 ax.plot(wvln,flux)
+
+ax.set_xlim(900,7000)
 ax.legend()
 plt.show()
 plt.close()

@@ -11,6 +11,5 @@ SCEN    = PATH+'scenarios'
 FLAG    = PATH+'wd/cwd2.flag'
 
 # Paths to TLUSTY and SYNSPEC executables
-# TLEXE   = PATH+'tlusty/tlusty3021.exe'
-TLEXE   = PATH+'tlusty302/tlusty302.exe'
-SYNEXE  = PATH+'synspec/synspec51.exe'
+TLEXE   = PATH+'tlusty3.01b/tlusty302.exe'
+SYNEXE  = PATH+'synspec51/synspec51.exe'
