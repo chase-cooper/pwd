@@ -35,7 +35,7 @@ def pureHmodel(scen:str,teff:float,log_g:float):
     subprocess.run(['ln','-s','-f',PATH+'/data','data'])
     subprocess.run(['ln','-s','-f',FLAG,'cwd.flag'])
 
-    writeUnit5(path=PATH+'scenarios/'+scen+'/lte',teff=teff,log_g=log_g,is_lte=False)
+    writeUnit5(path=PATH+'scenarios/'+scen+'/lte',teff=teff,log_g=log_g,is_lte=True)
 
     model_broke = False
     for i in range(ntries):
