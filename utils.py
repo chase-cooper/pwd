@@ -1,11 +1,12 @@
 from astropy.io import fits
 from astropy.table import Table
 from astropy.convolution import convolve
-from scipy.interpolate import interp1d
+from scipy.interpolate import interp1d,LinearNDInterpolator
 from consts import *
 import matplotlib.pyplot as plt
 import numpy as np
 import urllib.request
+import time
 
 ###########################################################################################
 
@@ -607,6 +608,48 @@ def openCOSfile(fname:str):
         hdu.close()
     return wvln,flux,sigma
 
+def convolveModelWithGaussian(wvln,flux,wvln_obs,width=3.):
+    """
+    Convolve a provided model spectrum (wvln [AA] and flux) with a Gaussian. The width of the
+    Gaussian is determined automatically from the spacing of the observed spectrum.
+    """
+
+    # Interpolate model spectrum down to observed spectrum wavelengths
+    flux = np.interp(wvln_obs,wvln,flux)
+    conv_flux   = np.zeros_like(wvln_obs)
+
+    # Convolve with Gaussian
+    dx = np.mean(wvln_obs[1:] - wvln_obs[:-1])
+    x = np.arange(-3*width,3*width,dx)
+    gaussian = np.exp(-(x/width)**2 / 2)
+    conv_flux = np.convolve(flux,gaussian,mode='same') / np.sum(gaussian)
+
+    # Return new wavelength array
+    new_wvln = np.copy(wvln_obs)
+
+    return new_wvln,conv_flux
+
+def openUVES(fname:str):
+    """
+    
+    """
+
+    file    = fits.open(fname)
+    # print(repr(file[0].header))
+    is_cal  = file[0].header['IS_FLUXD']
+    if not ('yes' in is_cal):
+        print("WARNING: spectrum at \'"+fname+"\' is not flux calibrated.")
+        exit(0)
+    res     = file[0].header['SPEC_RES']
+    data    = file[1].data[0]
+    file.close()
+
+    wvln = data[0]
+    flux = data[1]
+    sigma = data[2]
+
+    return wvln,flux,sigma,res
+
 ################################################################################################
 
 ### Other
@@ -640,49 +683,57 @@ def ABmag2flux(mag,wvln=None):
     return fluxJanskys
 ABmag2flux = np.vectorize(ABmag2flux)
 
-def convolveModelWithGaussian(wvln,flux,wvln_obs,width=3.):
-    """
-    Convolve a provided model spectrum (wvln [AA] and flux) with a Gaussian. The width of the
-    Gaussian is determined automatically from the spacing of the observed spectrum.
-    """
+################################################################################################
 
-    # Interpolate model spectrum down to observed spectrum wavelengths
-    flux = np.interp(wvln_obs,wvln,flux)
-    conv_flux   = np.zeros_like(wvln_obs)
+### interpolate over the Bédard+2020 models to get mass from a white dwarf's radius and T_eff.
+###     For use in photometric fitting
+start = time.time()
 
-    # Convolve with Gaussian
-    dx = np.mean(wvln_obs[1:] - wvln_obs[:-1])
-    x = np.arange(-3*width,3*width,dx)
-    gaussian = np.exp(-(x/width)**2 / 2)
-    conv_flux = np.convolve(flux,gaussian,mode='same') / np.sum(gaussian)
+atmo_size   = 'thin'    # Mass of hydrogen layer: 'thin' (q=1e-10) or 'thick' (q=1e-4)
+points      = None      # arrays of [t_eff,radius]
+values_m    = []        # values of mass
+values_logg = []        # values of log(g)
 
-    # Return new wavelength array
-    new_wvln = np.copy(wvln_obs)
+for mass in np.arange(20,131,5):
+    mass_str = '0'*bool(mass<100) + str(int(mass))
 
-    return new_wvln,conv_flux
+    with open(f'data/mass_radius/AllSequences/seq_{mass_str}_{atmo_size}.txt') as file:
+        lines = file.readlines()[5:-1]
+        for modelnum in range(0,len(lines),3):
+            entry = lines[modelnum].split()
+            teff    = float(entry[1])
+            logg    = float(entry[2])
+            rad     = float(entry[3])
+
+            if type(points) != np.ndarray:
+                points = np.array([teff,rad])
+            else:
+                points  = np.vstack([points,np.array([teff,rad])])
+
+            values_m.append(mass/100)
+            values_logg.append(logg)
+            # print(points[-1])
+        file.close()
+
+interpBedardMass = LinearNDInterpolator(points,values_m)        # derived value of log(g) is the same to <1%
+interpBedardLogg = LinearNDInterpolator(points,values_logg)
+
+print(f"Loaded Bédard model interpolators in {round(time.time()-start,4)}s")
+
+################################################################################################
+
+# G = 6.67e-8
+# r = 1.30*6371000*100
+# t = 11962
+# m = interpBedardMass([t,r])
+# logg = interpBedardLogg([t,r])
+# m_g = m * 2e33
+# g = G*m_g/r/r
+# print(logg)
+# print(np.log10(g))
 
 
-
-def openUVES(fname:str):
-    """
-    
-    """
-
-    file    = fits.open(fname)
-    # print(repr(file[0].header))
-    is_cal  = file[0].header['IS_FLUXD']
-    if not ('yes' in is_cal):
-        print("WARNING: spectrum at \'"+fname+"\' is not flux calibrated.")
-        exit(0)
-    res     = file[0].header['SPEC_RES']
-    data    = file[1].data[0]
-    file.close()
-
-    wvln = data[0]
-    flux = data[1]
-    sigma = data[2]
-
-    return wvln,flux,sigma,res
+# diffusion_time(10000,8,2)
 
 # openUVES('fits files/g1-7_uves_nuv.fits')
 

@@ -349,10 +349,10 @@ def fit_line(spec:str,scen:str,anum:int,minabn,maxabn,ddex,linecen,width,plotit:
 ################################################################################################
 
 # Forward model
-def log_likelihood(theta,wvln,flux,sigma,width,spec_dict,fit_halpha:bool=True,plotit:bool=False):
+def log_likelihood(theta,wvln,flux,sigma,width,spec_dict,fit_halpha:bool=False,plotit:bool=False):
 
     # unpack model parameters
-    teff,logg = theta
+    teff,logg,vrad = theta
 
     # use bilinear interpolation to get synthetic spectrum
     wvln_model,flux_model = bilinear_interp(teff,logg,spec_dict)
@@ -363,22 +363,10 @@ def log_likelihood(theta,wvln,flux,sigma,width,spec_dict,fit_halpha:bool=True,pl
     # convolve model spectrum with a gaussian
     wvln_model,flux_model = convolveModelWithGaussian(wvln_model,flux_model,wvln,width)
 
-    ### fitting to H-alpha/H-beta minimum
-    if fit_halpha:  minimum = 6562.8
-    else:           minimum = 4861.4
-
-    # Find wavelength of H-alpha minima and its shift in the observed spectrum
-    flux_obs_hmin   = flux[np.abs(wvln-minimum) <= 50]
-    flux_hmin_val   = min(flux_obs_hmin)
-    hmin_obs_ind    = np.argwhere(flux==flux_hmin_val)[0]
-    hmin_obs_wvln   = wvln[hmin_obs_ind][0]
-
-    # Apply corresponding Doppler shift to the model spectrum
-    wvln_ratio_squared = (hmin_obs_wvln/minimum)**2
-    beta            = -( (1-wvln_ratio_squared) / (1+wvln_ratio_squared) )
-    wvln_shift = wvln*np.sqrt((1+beta)/(1-beta))
-    flux_shift = flux_model
-    flux_model = np.interp(wvln,wvln_shift,flux_shift)
+    # Radial velocity shift
+    beta = vrad/3e5
+    wvln_model *= np.sqrt((1+beta)/(1-beta))
+    flux_model = np.interp(wvln,wvln_model,flux_model)
 
     ### Fit first 5 Balmer lines
     line_centers    = [6562.8,4861.4,4340.5,4101.7,3970.1,3889.1][(not fit_halpha):]
@@ -431,9 +419,10 @@ def log_likelihood(theta,wvln,flux,sigma,width,spec_dict,fit_halpha:bool=True,pl
 
 def log_prior(theta):
 
-    teff,logg = theta
+    teff,logg,vrad = theta
     if (teff < 10000) or (teff > 25000)\
-    or (logg < 6) or (logg > 9):
+    or (logg < 6) or (logg >= 9)\
+    or (vrad < -200) or (vrad > 200):
         return -np.inf
     else:
         return 0
@@ -453,15 +442,20 @@ def log_prob(theta,wvln,flux,sigma,width,spec_dict):
 # X-Shooter
 file_uvb = 'fits files/gd56_xsh_uvb.fits'
 wvln,flux,sigma,res_uvb = openXshooter(file_uvb)
-file_vis = 'fits files/gd56_xsh_vis.fits'
-wvln2,flux2,sigma2,res_vis = openXshooter(file_vis)
+# file_vis = 'fits files/g29-38_uves_vis.fits'
+# wvln2,flux2,sigma2,res_vis = openUVES(file_vis)
 
-wvln    = np.concat([wvln,wvln2])
-flux    = np.concat([flux,flux2])
-sigma   = np.concat([sigma,sigma2])
+# wvln    = np.concat([wvln,wvln2])
+# flux    = np.concat([flux,flux2])
+# sigma   = np.concat([sigma,sigma2])
+
+# fig,ax = plt.subplots()
+# ax.plot(wvln,flux)
+# plt.show()
 
 # Convolve model spectrum with a Gaussian with width given by the lowest resolution
-min_res = min(res_uvb,res_vis)
+# min_res = min(res_uvb,res_vis)
+min_res = res_uvb
 width = 5000/min_res
 
 # Load spectra dictionary
@@ -469,19 +463,17 @@ spec_dict = loadSpectra()
 
 ### TESTING
 
-res = log_likelihood([10100,8.8],wvln,flux,sigma,width,spec_dict,fit_halpha=False,plotit=True)
-print(res)
+res = log_likelihood([15000,8.0,0],wvln,flux,sigma,width,spec_dict,fit_halpha=False,plotit=True)
 input()
-# input()
-
+input()
 ### MCMC
 
 # variables for emcee
-ndim , nwalkers , nstep , nburn = 2 , 200 , 500 , 200
+ndim , nwalkers , nstep , nburn = 3 , 200 , 500 , 200
 
 # initial guess of parameters
-x0  = np.array([15000,8])
-pos = [x0*(1 + 1e-4*np.random.randn((2))) for w in range(nwalkers)]
+x0  = np.array([15000,8,10])
+pos = [x0*(1 + 1e-3*np.random.randn((3))) for w in range(nwalkers)]
 
 # backup file
 fn = 'simple emcee.h5'
@@ -497,19 +489,156 @@ reader  = emcee.backends.HDFBackend(fn)
 nthin   = 2
 samples = reader.get_chain(discard=nburn,thin=nthin,flat=True)
 
-# Get best fitting model
+# Get best-fitting individual model values
 lnprob  = reader.get_log_prob(discard=nburn,flat=True,thin=nthin)
 lnpmax  = np.amax(lnprob)
-xmax    = samples[np.where(lnprob==lnpmax)][0]
-print(xmax)
+xbest   = samples[np.where(lnprob==lnpmax)][0]
+print(lnpmax,xbest)
 # xmax    = [11960,8.23,1.3,57.02]
+
+# Get mean values
+xmean = []
+for i in range(ndim):
+    mean = np.percentile(samples[:,i],50)
+    print(mean)
+    xmean.append(mean)
+lnpmean = log_likelihood(xmean,wvln,flux,sigma,width,spec_dict,plotit=False)
+print(lnpmean,xmean)
 
 ### Plot results
 # MCMC
-fig     = corner.corner(samples,quantiles=[0.16,0.5,0.84],show_titles=True,labels=["T",r"$\log(g)$"])#,range=[[13000,25000],[7.75,8.25],[3e6,1.5e7],[1,100]])
+fig     = corner.corner(samples,quantiles=[0.16,0.5,0.84],show_titles=True,labels=["T",r"$\log(g)$",r"$v_{\rm rad}$"])#,range=[[13000,25000],[7.75,8.25],[3e6,1.5e7],[1,100]])
 plt.show()
 plt.close()
 
-log_likelihood(xmax,wvln,flux,sigma,width,spec_dict,plotit=True)
+### Plot fits to Balmer lines
+
+# unpack model parameters
+teff,logg,vrad = xbest
+
+# use bilinear interpolation to get synthetic spectrum
+wvln_model,flux_model = bilinear_interp(teff,logg,spec_dict)
+
+# model spectrum uses vacuum wavelengths -- switch to air (Morton 1991) (not sure how much this matters)
+wvln_model = wvln_model / (1 + 2.735e-4 + 131.4182/(wvln_model**2) + 2.7625e8/(wvln_model**4) ) 
+
+# convolve model spectrum with a gaussian
+wvln_model,flux_model = convolveModelWithGaussian(wvln_model,flux_model,wvln,width)
+
+# Radial velocity shift
+beta = vrad/3e5
+wvln_model *= np.sqrt((1+beta)/(1-beta))
+flux_model = np.interp(wvln,wvln_model,flux_model)
+
+### Fit first 5 Balmer lines
+fit_halpha = False
+line_centers    = [6562.8,4861.4,4340.5,4101.7,3970.1,3889.1][(not fit_halpha):]
+widths          = [150,120,80,50,30,20][(not fit_halpha):]
+labels          = [r"H$\alpha$",r"H$\beta$",r"H$\gamma$",r"H$\delta$",r"H$\epsilon$",r"H$\zeta$"][(not fit_halpha):]
+sum_chi2        = 0
+
+fig,ax = plt.subplots()
+
+# For each of the first 4/5 Balmer lines:
+for i in range(len(line_centers)):
+    # print(i)
+
+    # normalize observed and modelled spectrua to average spectra at a fixed distance from the line center
+    blue_ave        = np.average(flux[np.abs(wvln-(line_centers[i]-widths[i])) <= 2])
+    red_ave         = np.average(flux[np.abs(wvln-(line_centers[i]+widths[i])) <= 2]) #
+    cut_wvln        = wvln[np.abs(wvln-line_centers[i]) <= widths[i]]
+    cut_flux_obs    = flux[np.abs(wvln-line_centers[i]) <= widths[i]]
+    
+    norm_obs        = np.interp(cut_wvln,
+                                [cut_wvln[0],cut_wvln[-1]],
+                                [blue_ave,red_ave])
+                                # [cut_flux_obs[0],cut_flux_obs[-1]])
+
+    cut_flux_model  = flux_model[np.abs(wvln-line_centers[i]) <= widths[i]]
+    norm_model      = np.interp(cut_wvln,
+                                [cut_wvln[0],cut_wvln[-1]],
+                                [cut_flux_model[0],cut_flux_model[-1]])
+
+    # calculate chi^2 of the fit and add it to the total chi2
+    # to get new sigmas for normalized flux, divide by original flux to get percentage differences
+    cut_sigma       = sigma[np.abs(wvln-line_centers[i]) <= widths[i]]/cut_flux_obs
+
+    score = chi2(cut_flux_obs/norm_obs,cut_flux_model/norm_model,cut_sigma)
+    sum_chi2 += score
+
+    ax.plot(cut_wvln-line_centers[i],cut_flux_obs/norm_obs + 0.3*i,c='black')
+    ax.plot(cut_wvln-line_centers[i],cut_flux_model/norm_model + 0.3*i,c='red',zorder=100)
+    ax.text(-widths[i]-20,1+0.3*i,labels[i])
+
+# unpack model parameters
+teff,logg,vrad = xmean
+
+# use bilinear interpolation to get synthetic spectrum
+wvln_model,flux_model = bilinear_interp(teff,logg,spec_dict)
+
+# model spectrum uses vacuum wavelengths -- switch to air (Morton 1991) (not sure how much this matters)
+wvln_model = wvln_model / (1 + 2.735e-4 + 131.4182/(wvln_model**2) + 2.7625e8/(wvln_model**4) ) 
+
+# convolve model spectrum with a gaussian
+wvln_model,flux_model = convolveModelWithGaussian(wvln_model,flux_model,wvln,width)
+
+# Radial velocity shift
+beta = vrad/3e5
+wvln_model *= np.sqrt((1+beta)/(1-beta))
+flux_model = np.interp(wvln,wvln_model,flux_model)
+
+### Fit first 5 Balmer lines
+fit_halpha = False
+line_centers    = [6562.8,4861.4,4340.5,4101.7,3970.1,3889.1][(not fit_halpha):]
+widths          = [150,120,80,50,30,20][(not fit_halpha):]
+labels          = [r"H$\alpha$",r"H$\beta$",r"H$\gamma$",r"H$\delta$",r"H$\epsilon$",r"H$\zeta$"][(not fit_halpha):]
+sum_chi2        = 0
+
+# fig,ax = plt.subplots()
+
+# For each of the first 4/5 Balmer lines:
+for i in range(len(line_centers)):
+    # print(i)
+
+    # normalize observed and modelled spectrua to average spectra at a fixed distance from the line center
+    blue_ave        = np.average(flux[np.abs(wvln-(line_centers[i]-widths[i])) <= 2])
+    red_ave         = np.average(flux[np.abs(wvln-(line_centers[i]+widths[i])) <= 2]) #
+    cut_wvln        = wvln[np.abs(wvln-line_centers[i]) <= widths[i]]
+    cut_flux_obs    = flux[np.abs(wvln-line_centers[i]) <= widths[i]]
+    
+    norm_obs        = np.interp(cut_wvln,
+                                [cut_wvln[0],cut_wvln[-1]],
+                                [blue_ave,red_ave])
+                                # [cut_flux_obs[0],cut_flux_obs[-1]])
+
+    cut_flux_model  = flux_model[np.abs(wvln-line_centers[i]) <= widths[i]]
+    norm_model      = np.interp(cut_wvln,
+                                [cut_wvln[0],cut_wvln[-1]],
+                                [cut_flux_model[0],cut_flux_model[-1]])
+    
+
+    # calculate chi^2 of the fit and add it to the total chi2
+        # to get new sigmas for normalized flux, divide by original flux to get percentage differences
+    cut_sigma       = sigma[np.abs(wvln-line_centers[i]) <= widths[i]]/cut_flux_obs
+
+    score = chi2(cut_flux_obs/norm_obs,cut_flux_model/norm_model,cut_sigma)
+    sum_chi2 += score
+
+    ax.plot(cut_wvln-line_centers[i],cut_flux_obs/norm_obs + 0.3*i,c='black')
+    ax.plot(cut_wvln-line_centers[i],cut_flux_model/norm_model + 0.3*i,c='forestgreen',zorder=100)
+    ax.text(-widths[i]-20,1+0.3*i,labels[i])
+
+ax.plot([],[],c='black',label='Observed')
+ax.plot([],[],c='red',label=r"Mean values, $\chi_\nu^2=$"+str(round(-2*lnpmean,2)))
+ax.plot([],[],c='forestgreen',label=r"Best fit model, $\chi_\nu^2=$"+str(round(-2*lnpmax)))
+ax.set_xlabel(r"$\Delta\lambda\,\, [\AA]$",size='large')
+ax.set_ylabel("Normalized flux",size='large')
+ax.set_xlim(-175,175)
+ax.set_ylim(bottom=0)
+ax.legend()
+plt.show()
+plt.close()
+
+log_likelihood(xbest,wvln,flux,sigma,width,spec_dict,plotit=True)
 
 

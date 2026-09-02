@@ -258,21 +258,10 @@ def interp_spectrum_dict(t,logg,spec_dict):
 
 #################
 
-spec_dict = loadSpectra()
-
-# Vary across temperature
-dat1 = np.genfromtxt('tlusty/hydrogengrid/t15000_g8.0.spec')
-wvln1,flux1 = dat1[:,0],dat1[:,1]
-
-dat2 = np.genfromtxt('tlusty/hydrogengrid/t15500_g8.0.spec')
-wvln2,flux2 = dat2[:,0],dat2[:,1]
-
-wvln3,flux3 = interp_spectrum_dict(15250,8,spec_dict=spec_dict)
+wvln,flux,sigma = openCOSfile('fits files/wd1226+110_cos_fuv.fits')
 
 fig,ax = plt.subplots()
-ax.plot(wvln1,flux1,label="T=15,000K")
-ax.plot(wvln2,flux2,label="T=15,500K")
-ax.plot(wvln3,flux3,label="Interp")
+ax.plot(wvln,flux)
 ax.legend()
 plt.show()
 plt.close()

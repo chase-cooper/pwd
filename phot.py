@@ -847,7 +847,7 @@ sig_P0  = plx_err
 spec_dict = loadSpectra()
 
 # variables for emcee
-ndim , nwalkers , nstep , nburn = 4 , 20 , 100 , 0
+ndim , nwalkers , nstep , nburn = 4 , 100 , 200 , 100
 
 # initial guess of parameters
 x0  = np.array([15000,8,1,10])
@@ -873,6 +873,15 @@ lnpmax  = np.amax(lnprob)
 xmax    = samples[np.where(lnprob==lnpmax)][0]
 # xmax    = [11960,8.23,1.3,57.02]
 
+# Get mean values
+xmean = []
+for i in range(ndim):
+    mean = np.percentile(samples[:,i],50)
+    print(mean)
+    xmean.append(mean)
+lnpmean = log_likelihood(xmean,wvln_obs,flux_obs,err_obs,spec_dict)
+print(lnpmean,xmean)
+
 ### Plot results
 # MCMC
 fig     = corner.corner(samples,quantiles=[0.16,0.5,0.84],show_titles=True,labels=["T",r"$\log(g)$","R",r"$\pi$"])#,range=[[13000,25000],[7.75,8.25],[3e6,1.5e7],[1,100]])
@@ -885,12 +894,16 @@ wvln,flux       = interp_spectrum_dict(teff,logg,spec_dict)
 phot_model_emi  = model_flux_to_phot(wvln,flux)
 phot_model_obs  = phot_model_emi*rm*rm/d/d
 
+# Implied log(g) from Bédard models
+r_cm = r * 6371*100000
+imp_logg = interpBedardLogg([teff,r_cm])
+print("Interpolated log(g) from Bédard+20 models:   "+str(imp_logg))
+
 fig2,ax2    = plt.subplots()
 ax2.errorbar(wvln_obs[flux_obs!=0],flux_obs[flux_obs!=0],err_obs[flux_obs!=0],linestyle='',label='Observed')
 ax2.scatter(wvln_obs[flux_obs!=0],phot_model_obs[flux_obs!=0],c='black',label='Single best fit')
 
 plt.show()
 
-input()
 
 
